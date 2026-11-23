@@ -215,6 +215,8 @@ pub struct AccountPatch {
     pub screenshot: Option<Option<String>>,
     pub started_at: Option<Option<String>>,
     pub finished_at: Option<Option<String>>,
+    pub verify_status: Option<Option<String>>,
+    pub verified_at: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -576,6 +578,18 @@ impl Db {
             .optional()?)
     }
 
+    /// A mailbox has at most one browser.
+    pub fn browser_of_mailbox(&self, mailbox_id: i64) -> Result<Option<Browser>> {
+        Ok(self
+            .c()
+            .query_row(
+                &format!("SELECT {BROWSER} FROM browsers WHERE mailbox_id=?"),
+                [mailbox_id],
+                browser,
+            )
+            .optional()?)
+    }
+
     /// The ShardBrowser profile id (`browsers.path`); None clears it.
     pub fn browser_set_path(&self, id: i64, profile_id: Option<&str>) -> Result<()> {
         self.c().execute(
@@ -637,6 +651,8 @@ impl Db {
         put("screenshot", &p.screenshot);
         put("started_at", &p.started_at);
         put("finished_at", &p.finished_at);
+        put("verify_status", &p.verify_status);
+        put("verified_at", &p.verified_at);
         let sql = format!(
             "UPDATE accounts SET {}updated_at=? WHERE id=?",
             sets.iter().map(|c| format!("{c}=?, ")).collect::<String>()
@@ -693,6 +709,34 @@ impl Db {
         ))?;
         let rows = st
             .query_map(params![platform, limit], account)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// The Accounts list, newest first: no secrets, only whether a key is kept.
+    pub fn account_rows(&self, platform: &str, limit: i64) -> Result<Vec<serde_json::Value>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT a.id, m.email, a.status, a.step, a.step_note, a.error_code, a.error, p.host, \
+             a.started_at, a.finished_at, json_extract(a.secrets, '$.api_key') IS NOT NULL \
+             FROM accounts a JOIN mailboxes m ON m.id=a.mailbox_id \
+             LEFT JOIN browsers b ON b.mailbox_id=a.mailbox_id LEFT JOIN proxies p ON p.id=b.proxy_id \
+             WHERE a.platform=? ORDER BY a.id DESC LIMIT ?",
+        )?;
+        let rows = st
+            .query_map(params![platform, limit], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?, "email": r.get::<_, String>(1)?,
+                    "status": r.get::<_, String>(2)?, "step": r.get::<_, Option<String>>(3)?,
+                    "step_note": r.get::<_, Option<String>>(4)?,
+                    "error_code": r.get::<_, Option<String>>(5)?,
+                    "error": r.get::<_, Option<String>>(6)?,
+                    "proxy_host": r.get::<_, Option<String>>(7)?,
+                    "started_at": r.get::<_, Option<String>>(8)?,
+                    "finished_at": r.get::<_, Option<String>>(9)?,
+                    "has_key": r.get::<_, bool>(10)?,
+                }))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
     }
