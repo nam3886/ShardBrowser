@@ -1,0 +1,9 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Widget</title></head>
+<body style="margin:0"><label style="display:block;width:300px;height:65px;line-height:65px">
+  <input type="checkbox"> Verify you are human</label>
+<script>
+  // Only a real (trusted) press counts, once per press (a label click also clicks its box).
+  addEventListener("pointerdown", (e) => { if (e.isTrusted) parent.postMessage({ pressed: 1 }, "*"); }, true);
+</script>
+</body></html>

@@ -1,0 +1,104 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Sign in - Breeze Blue</title></head>
+<body>
+<main>
+  <h1>Welcome to Breeze Blue</h1>
+  <p id="loading" hidden>Loading sign-in configuration...</p>
+  <form id="form" onsubmit="return false">
+    <input type="email" id="email" placeholder="Email">
+    <input type="password" id="password" placeholder="Password">
+    <button type="button" id="google">Continue with Google</button>
+    <button type="button" id="go">Continue</button>
+  </form>
+  <p id="msg"></p>
+  <div class="cf-turnstile" id="cf" hidden>
+    <div id="host"></div>
+    <input type="hidden" name="cf-turnstile-response" value="">
+  </div>
+  <button type="button" id="retry" hidden>Try again</button>
+</main>
+<script>
+  const K = /*KNOBS*/{};
+  const $ = (id) => document.getElementById(id);
+  const ev = (e) => fetch("/api/ev", { method: "POST", body: e, keepalive: true });
+  const say = (t) => { $("msg").textContent = t; };
+  const TURNSTILE = "Verify to create your account. Complete this check once to continue your registration.";
+  const check = () => { $("cf").hidden = true; $("retry").hidden = true; say("Check your email. Verification email sent."); };
+  const failed = () => {
+    say(TURNSTILE + " Verification failed. Verification is temporarily unavailable. Please try again.");
+    $("retry").hidden = false;
+  };
+
+  // The sign-in configuration loads K.config_load_ms after the last keystroke
+  // (so a Continue right after typing finds it still loading).
+  let ready = !(K.config_load_ms > 0), timer;
+  const loading = () => {
+    ready = false;
+    $("loading").hidden = false;
+    clearTimeout(timer);
+    timer = setTimeout(() => { ready = true; $("loading").hidden = true; }, K.config_load_ms);
+  };
+  if (!ready) { loading(); $("form").addEventListener("input", loading); }
+  $("go").disabled = K.continue_disabled;
+  // Like a React form: Continue sends the form's own state, which typing
+  // updates, not what the inputs show.
+  window.store = { email: "", password: "" };
+  $("form").addEventListener("input", (e) => { store[e.target.id] = e.target.value; });
+
+  $("go").addEventListener("click", async () => {
+    ev("click Continue");
+    if (!ready) return; // the form does nothing until its configuration has loaded
+    const body = JSON.stringify({ email: store.email, password: store.password });
+    const r = await (await fetch("/api/continue", { method: "POST", headers: { "content-type": "application/json" }, body })).json();
+    if (r.r === "reset") { $("email").value = ""; $("password").value = ""; store.email = store.password = ""; }
+    else if (r.r === "empty") say("Please enter your email address. Please enter your password.");
+    else if (r.r === "in") location = "/welcome";
+    else if (r.r === "wrong") say("We couldn’t continue with that email and password. Check the password");
+    else if (r.r === "new") turnstile();
+  });
+
+  function turnstile() {
+    const m = K.turnstile;
+    if (m === "pass") return check();
+    if (m === "never") return say(TURNSTILE);
+    if (m === "click") { say(TURNSTILE); return widget(); }
+    if (m === "passed") { // drawn and already passed: the page moves on a moment later
+      say(TURNSTILE);
+      widget();
+      document.querySelector("input[name=cf-turnstile-response]").value = "fixture-token";
+      return setTimeout(check, K.pass_delay_ms);
+    }
+    failed(); // fail_once, fail, linger
+  }
+
+  $("retry").addEventListener("click", () => {
+    ev("click Try again");
+    if (K.turnstile === "fail_once") check();
+    else if (K.turnstile === "linger") setTimeout(check, K.linger_ms); // the old failure text stays a while
+    else failed();
+  });
+
+  // A Turnstile-like widget: a cross-site iframe in a closed shadow root, its
+  // response field next to the shadow host. Passes after K.presses trusted presses.
+  let presses = 0;
+  function widget() {
+    $("cf").hidden = false;
+    const root = $("host").attachShadow({ mode: "closed" });
+    const f = document.createElement("iframe");
+    f.src = K.other + "/cf/widget.html";
+    f.width = 300;
+    f.height = 65;
+    f.style.border = "0";
+    root.appendChild(f);
+  }
+  addEventListener("message", (e) => {
+    if (!e.data || !e.data.pressed) return;
+    presses++;
+    ev("cf press");
+    if (presses === K.presses) setTimeout(() => {
+      document.querySelector("input[name=cf-turnstile-response]").value = "fixture-token";
+      check();
+    }, K.pass_delay_ms);
+  });
+</script>
+</body></html>

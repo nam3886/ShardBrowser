@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Welcome - Breeze Blue</title></head>
+<body>
+  <h1>Tell us about you</h1>
+  <p id="q">Question 1 of 2</p>
+  <button type="button" id="skip">Skip question</button>
+  <button type="button" id="start" hidden>Start creating</button>
+<script>
+  const K = /*KNOBS*/{};
+  const $ = (id) => document.getElementById(id);
+  const ev = (e) => fetch("/api/ev", { method: "POST", body: e, keepalive: true });
+  let skips = 0;
+  const done = () => { $("skip").hidden = true; $("start").hidden = false; };
+  $("skip").addEventListener("click", () => {
+    ev("click Skip question");
+    skips++;
+    $("q").textContent = "Question " + Math.min(skips + 1, 2) + " of 2";
+    if (skips < 2) return;
+    if (K.survey_busy_ms) { $("skip").disabled = true; setTimeout(done, K.survey_busy_ms); } // the survey saves
+    else done();
+  });
+  $("start").addEventListener("click", async () => {
+    ev("click Start creating");
+    await fetch("/api/survey-done", { method: "POST" });
+    location = "/app/home";
+  });
+</script>
+</body></html>

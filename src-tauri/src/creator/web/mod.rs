@@ -92,7 +92,12 @@ pub(crate) fn stale(e: &WebError) -> bool {
 }
 
 /// `f` again while its error is `stale` (a navigation in between), at most ~2 s.
-pub(crate) async fn retry_stale<T>(mut f: impl AsyncFnMut() -> WebResult<T>) -> WebResult<T> {
+/// A closure returning a future, not an async closure: the futures of async
+/// closures are not provably `Send` (rustc), and a run is spawned on tokio.
+pub(crate) async fn retry_stale<T, F>(mut f: impl FnMut() -> F) -> WebResult<T>
+where
+    F: std::future::Future<Output = WebResult<T>>,
+{
     let mut tries = 0;
     loop {
         match f().await {
@@ -319,7 +324,7 @@ impl Page {
         js_fn: &str,
         world: World,
     ) -> WebResult<T> {
-        retry_stale(async || {
+        retry_stale(|| async move {
             let ctx = self.context(world).await?;
             let call = CallFunctionOnParams::builder()
                 .function_declaration(js_fn)
