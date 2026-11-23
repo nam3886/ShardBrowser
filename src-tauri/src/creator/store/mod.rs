@@ -174,6 +174,56 @@ pub struct NewMail {
     pub received_at: Option<String>,
 }
 
+/// One Outlook combo line, without its password and recovery address
+/// (never stored).
+#[derive(Clone, PartialEq)]
+pub struct OutlookLine {
+    pub email: String,
+    pub token: String,
+    pub client_id: String,
+    pub domain: String,
+}
+
+/// What an Outlook paste did: rows added, duplicate line numbers (already
+/// stored or earlier in the paste), unreadable lines with the reason.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OutlookImport {
+    pub added: usize,
+    pub duplicates: Vec<usize>,
+    pub invalid: Vec<(usize, &'static str)>,
+}
+
+pub const OUTLOOK_LINE: &str = "not email|password|refresh_token|client_id|recovery";
+
+/// Outlook combo lines `email|password|refresh_token|client_id|recovery`
+/// (Python `outlook._parse`): 1-based line numbers counting blank lines,
+/// each part trimmed; the password and recovery are dropped.
+pub fn parse_outlook(text: &str) -> (Vec<(usize, OutlookLine)>, Vec<(usize, &'static str)>) {
+    let (mut valid, mut invalid) = (Vec::new(), Vec::new());
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let p: Vec<&str> = line.split('|').map(str::trim).collect();
+        let domain = p[0].split_once('@').map_or("", |(_, d)| d);
+        if p.len() != 5 || domain.is_empty() || p[2].is_empty() || p[3].is_empty() {
+            invalid.push((i + 1, OUTLOOK_LINE));
+            continue;
+        }
+        valid.push((
+            i + 1,
+            OutlookLine {
+                email: p[0].to_string(),
+                token: p[2].to_string(),
+                client_id: p[3].to_string(),
+                domain: domain.to_string(),
+            },
+        ));
+    }
+    (valid, invalid)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Proxy {
     pub id: i64,
@@ -535,6 +585,50 @@ impl Db {
             params![status, id],
         )?;
         Ok(())
+    }
+
+    /// Outlook combos (Python `import_outlook`), in one transaction: the
+    /// addresses already stored are found through the email index from a
+    /// temp table (never the whole table), then each new line is inserted.
+    /// Email match is exact, as Python's.
+    pub fn import_outlook(&self, text: &str) -> Result<OutlookImport> {
+        let (valid, invalid) = parse_outlook(text);
+        let mut c = self.c();
+        // An error rolls the transaction back, the temp table with it.
+        let tx = c.transaction()?;
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS _imp (email TEXT); DELETE FROM temp._imp;")?;
+        {
+            let mut ins = tx.prepare("INSERT INTO temp._imp VALUES (?)")?;
+            for (_, l) in &valid {
+                ins.execute([&l.email])?;
+            }
+        }
+        let mut known: HashSet<String> = tx
+            .prepare("SELECT email FROM mailboxes WHERE email IN (SELECT email FROM temp._imp)")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        tx.execute_batch("DROP TABLE temp._imp")?;
+        let mut out = OutlookImport {
+            invalid,
+            ..Default::default()
+        };
+        {
+            let mut ins = tx.prepare(
+                "INSERT INTO mailboxes (provider, email, domain, token, status, client_id, created_at) \
+                 VALUES ('outlook', ?, ?, ?, 'active', ?, ?)",
+            )?;
+            let ts = now();
+            for (n, l) in valid {
+                if !known.insert(l.email.clone()) {
+                    out.duplicates.push(n);
+                    continue;
+                }
+                ins.execute(params![l.email, l.domain, l.token, l.client_id, ts])?;
+                out.added += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(out)
     }
 
     /// Outlook's rotated refresh token.
@@ -1239,5 +1333,119 @@ mod tests {
             .unwrap();
         assert_eq!(db.events_of(id).unwrap().len(), 1);
         assert_eq!(db.accounts_recent("breezeblue", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_valid() {
+        let (valid, invalid) =
+            parse_outlook("a@outlook.example|pw|M.Ctok|cid-uuid|rec@x.example");
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+        let (n, l) = &valid[0];
+        assert_eq!(
+            (*n, l.email.as_str(), l.token.as_str(), l.client_id.as_str(), l.domain.as_str()),
+            (1, "a@outlook.example", "M.Ctok", "cid-uuid", "outlook.example")
+        );
+    }
+
+    #[test]
+    fn parse_invalid() {
+        let text = "a|b|c\n\nnoat|pw|t|c|r\na@x.example|pw||c|r\na@x.example|pw|t||r\n b@ |pw|t|c|r";
+        let (valid, invalid) = parse_outlook(text);
+        assert!(valid.is_empty());
+        assert_eq!(
+            invalid.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            [1, 3, 4, 5, 6]
+        );
+        assert!(invalid.iter().all(|(_, r)| *r == OUTLOOK_LINE));
+    }
+
+    #[test]
+    fn import_creates_rows() {
+        let (db, _f) = temp_db();
+        let r = db
+            .import_outlook("a@outlook.example|pw|T1|C1|r\nb@hotmail.example|pw|T2|C2|r")
+            .unwrap();
+        assert_eq!(r.added, 2);
+        let m = db.mailbox_get(1).unwrap().unwrap();
+        assert_eq!(
+            (
+                m.provider.as_str(),
+                m.status.as_str(),
+                m.token.as_str(),
+                m.client_id.as_deref(),
+                m.domain.as_str()
+            ),
+            ("outlook", "active", "T1", Some("C1"), "outlook.example")
+        );
+    }
+
+    #[test]
+    fn import_dedup() {
+        let (db, _f) = temp_db();
+        db.import_outlook("a@outlook.example|pw|T1|C1|r").unwrap();
+        let r = db
+            .import_outlook("a@outlook.example|pw|T1|C1|r\nb@outlook.example|pw|T|C|r\nb@outlook.example|pw|T|C|r")
+            .unwrap();
+        assert_eq!((r.added, r.duplicates), (1, vec![1, 3]));
+    }
+
+    #[test]
+    fn import_dedupes_in_paste_and_against_store_at_40k() {
+        let (db, _f) = temp_db();
+        let line = |i: usize| format!("u{i}@outlook.example|pw|T{i}|C|r");
+        let stored: Vec<String> = (0..3000).map(line).collect();
+        assert_eq!(db.import_outlook(&stored.join("\n")).unwrap().added, 3000);
+        // 39,400 distinct (3,000 of them stored), 500 repeats, 100 bad lines.
+        let mut lines: Vec<String> = (0..39_400).map(line).collect();
+        lines.extend((0..500).map(|i| line(39_000 + i)));
+        lines.extend((0..100).map(|i| format!("bad line {i}")));
+        assert_eq!(lines.len(), 40_000);
+        let t = std::time::Instant::now();
+        let r = db.import_outlook(&lines.join("\n")).unwrap();
+        let took = t.elapsed();
+        eprintln!("import of 40,000 lines: {took:?}");
+        assert_eq!(
+            (r.added, r.duplicates.len(), r.invalid.len()),
+            (36_400, 3_500, 100)
+        );
+        assert_eq!(r.duplicates[0], 1);
+        assert_eq!(r.invalid[0].0, 39_901);
+        assert!(took < Duration::from_secs(5), "{took:?}");
+    }
+
+    #[test]
+    fn import_leaves_no_temp_table() {
+        let (db, _f) = temp_db();
+        db.import_outlook("a@outlook.example|pw|T1|C1|r").unwrap();
+        let n: i64 = db
+            .c()
+            .query_row(
+                "SELECT COUNT(*) FROM temp.sqlite_master WHERE name='_imp'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn password_and_recovery_never_stored() {
+        let (db, _f) = temp_db();
+        db.import_outlook("a@outlook.example|PWSECRET9|T1|C1|RECSECRET9@x.example")
+            .unwrap();
+        let c = db.c();
+        let mut st = c.prepare("SELECT * FROM mailboxes").unwrap();
+        let cols = st.column_count();
+        let mut rows = st.query([]).unwrap();
+        let mut all = String::new();
+        while let Some(r) = rows.next().unwrap() {
+            for i in 0..cols {
+                let v: rusqlite::types::Value = r.get(i).unwrap();
+                all.push_str(&format!("{v:?}|"));
+            }
+        }
+        assert!(all.contains("T1"), "{all}");
+        assert!(!all.contains("PWSECRET9") && !all.contains("RECSECRET9"), "{all}");
     }
 }
