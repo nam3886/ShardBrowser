@@ -27,7 +27,11 @@ fn env(k: &str) -> String {
 fn day_secs(t: &str) -> Option<f64> {
     let hms = t.split_once('T')?.1.get(..15)?;
     let mut p = hms.split(':');
-    let (h, m, s): (f64, f64, f64) = (p.next()?.parse().ok()?, p.next()?.parse().ok()?, p.next()?.parse().ok()?);
+    let (h, m, s): (f64, f64, f64) = (
+        p.next()?.parse().ok()?,
+        p.next()?.parse().ok()?,
+        p.next()?.parse().ok()?,
+    );
     Some(h * 3600.0 + m * 60.0 + s)
 }
 
@@ -77,7 +81,10 @@ async fn live_breeze() {
         .collect();
     accts.sort_by_key(|a| a.id);
     for a in &accts {
-        let secs = match (a.started_at.as_deref().and_then(day_secs), a.finished_at.as_deref().and_then(day_secs)) {
+        let secs = match (
+            a.started_at.as_deref().and_then(day_secs),
+            a.finished_at.as_deref().and_then(day_secs),
+        ) {
             (Some(s), Some(f)) => format!("{:.0}", (f - s).rem_euclid(86400.0)),
             _ => "?".into(),
         };
@@ -99,5 +106,9 @@ async fn live_breeze() {
             );
         }
     }
-    eprintln!("JOB {job}: {} accounts, {} linked", accts.len(), accts.iter().filter(|a| a.status == "linked").count());
+    eprintln!(
+        "JOB {job}: {} accounts, {} linked",
+        accts.len(),
+        accts.iter().filter(|a| a.status == "linked").count()
+    );
 }
