@@ -22,6 +22,8 @@ struct FakeInbox {
     reuse_err: Option<String>,
     /// The page re-renders (inputs emptied) while the mailbox is reused.
     wipe: bool,
+    /// The form's own state resets while the inputs still show the values.
+    reset_store: bool,
     waited: Mutex<Vec<(String, Vec<String>)>>,
     filled_at_reuse: Mutex<Option<bool>>,
 }
@@ -39,6 +41,10 @@ impl Inbox for FakeInbox {
                 let js =
                     "() => { for (const i of document.querySelectorAll('input')) i.value = ''; }";
                 self.page.eval::<()>(js, World::Isolated).await.unwrap();
+            }
+            if self.reset_store {
+                let js = "() => { store.email = ''; store.password = ''; }";
+                self.page.eval::<()>(js, World::Main).await.unwrap();
             }
             self.rec.event("reuse");
             Ok(())
@@ -81,6 +87,7 @@ impl Env {
             link: Some(site.link.clone()),
             reuse_err: None,
             wipe: false,
+            reset_store: false,
             waited: Mutex::default(),
             filled_at_reuse: Mutex::default(),
         };
@@ -170,6 +177,11 @@ async fn email_happy_path() {
     linked(&o);
     let ev = e.site.seen(|s| s.events.clone());
     let at = |x: &str| ev.iter().position(|e| e == x).unwrap();
+    assert_eq!(
+        ev.first().map(String::as_str),
+        Some("visit login"),
+        "{ev:?}"
+    );
     // Filled before the mailbox reuse, reused once, before Continue.
     assert_eq!(*e.inbox.filled_at_reuse.lock().unwrap(), Some(true));
     assert!(at("reuse") < at("click Continue"), "{ev:?}");
@@ -364,6 +376,52 @@ async fn turnstile_ticked_near_the_deadline_gets_time_to_pass() {
         .await,
     );
     assert_eq!(e.site.count("cf press"), 2);
+}
+
+#[tokio::test]
+async fn turnstile_ticks_stop_at_ticks() {
+    let e = env!(Knobs {
+        turnstile: Turnstile::NeedsClick {
+            presses: 3,
+            delay_ms: 0
+        },
+        ..Knobs::default()
+    });
+    let mut tm = Timings::fast();
+    tm.submit_wait = Duration::from_secs(1);
+    tm.tick_grace = Duration::ZERO;
+    let o = signup(
+        &e,
+        Opts {
+            tm,
+            ..Opts::default()
+        },
+    )
+    .await;
+    assert_eq!(o.error.as_deref(), Some(CAPTCHA_UNSOLVED));
+    assert_eq!(e.site.count("cf press"), 2);
+}
+
+/// A passed widget stays drawn: never press it (live x.ai 2026-11-19).
+#[tokio::test]
+async fn turnstile_widget_that_passed_is_never_pressed() {
+    let e = env!(Knobs {
+        turnstile: Turnstile::Passed { delay_ms: 2500 },
+        ..Knobs::default()
+    });
+    let mut tm = Timings::fast();
+    tm.tick_grace = Duration::ZERO;
+    linked(
+        &signup(
+            &e,
+            Opts {
+                tm,
+                ..Opts::default()
+            },
+        )
+        .await,
+    );
+    assert_eq!(e.site.count("cf press"), 0);
 }
 
 #[tokio::test]
@@ -578,6 +636,20 @@ async fn form_wiped_during_the_mailbox_reuse_is_filled_again() {
     let mut e = env!(Knobs::default());
     e.inbox.wipe = true;
     linked(&signup(&e, Opts::default()).await);
+}
+
+/// The refill after the mailbox reuse types again even when the inputs still
+/// show the values: the page's own form state may have been reset.
+#[tokio::test]
+async fn form_state_reset_during_the_mailbox_reuse_is_typed_again() {
+    let mut e = env!(Knobs::default());
+    e.inbox.reset_store = true;
+    linked(&signup(&e, Opts::default()).await);
+    assert_eq!(e.site.count("click Continue"), 1);
+    assert_eq!(
+        e.site.seen(|s| s.typed_password.clone()).as_deref(),
+        Some(NEW_PW)
+    );
 }
 
 #[tokio::test]
