@@ -1649,7 +1649,9 @@ mod tests {
     #[test]
     fn a_mail_stored_twice_by_message_id_is_kept_once() {
         let (db, _f) = temp_db();
-        let mb = db.mailbox_create("outlook", "a@outlook.example", "outlook.example", "T").unwrap();
+        let mb = db
+            .mailbox_create("outlook", "a@outlook.example", "outlook.example", "T")
+            .unwrap();
         let m = NewMail {
             ele_message_id: Some("M1".into()),
             ..Default::default()
