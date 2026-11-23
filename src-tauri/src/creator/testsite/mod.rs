@@ -1,7 +1,8 @@
 //! Test-only: a fake Breeze Blue in-process, at the real site's paths, with
 //! knobs per test. One account (the test's email); the session is a cookie.
 //! The Turnstile-like widget is served on the `other` origin (cross-site, its
-//! own process), like Cloudflare's frame.
+//! own process), like Cloudflare's frame. A fake Ele API under `/ele/` holds
+//! the verify mail once the account exists (`Site::ele`).
 
 use std::sync::{Arc, Mutex};
 
@@ -110,8 +111,11 @@ pub struct Seen {
 
 struct St {
     k: Knobs,
+    site: String,
     other: String,
     password: Option<String>,
+    /// When the account was made: the verify mail's date.
+    mail_at: Option<String>,
     survey_done: bool,
     seen: Seen,
 }
@@ -130,7 +134,9 @@ impl Site {
         let st: Shared = Arc::new(Mutex::new(St {
             password: k.existing_password.clone(),
             k,
+            site: String::new(),
             other: String::new(),
+            mail_at: None,
             survey_done: false,
             seen: Seen::default(),
         }));
@@ -146,9 +152,16 @@ impl Site {
             .route("/v1/balance", get(balance))
             .route("/api/ev", post(event))
             .route("/cf/widget.html", get(|| async { html(WIDGET.into()) }))
+            .route("/ele/mail-domains", get(ele_domains))
+            .route("/ele/inbox", post(ele_inbox))
+            .route("/ele/inbox/:token/emails", get(ele_emails))
             .with_state(st.clone());
         let server = FixtureServer::start_with(routes).await;
-        st.lock().unwrap().other = server.other.clone();
+        {
+            let mut st = st.lock().unwrap();
+            st.other = server.other.clone();
+            st.site = server.site.clone();
+        }
         let s = &server.site;
         let urls = Urls {
             login: format!("{s}/auth/login?next=/app/home"),
@@ -165,6 +178,11 @@ impl Site {
             st,
             _server: server,
         }
+    }
+
+    /// The fake Ele API's base URL (`EleClient::new`).
+    pub fn ele(&self) -> String {
+        format!("{}/ele/", self.urls.login.split("/auth/").next().unwrap())
     }
 
     pub fn seen<T>(&self, f: impl FnOnce(&Seen) -> T) -> T {
@@ -261,6 +279,7 @@ async fn continue_(Ax(st): Ax<Shared>, Json(f): Json<Form>) -> Response {
                 Some(_) => "wrong",
                 None => {
                     st.password = Some(f.password); // the account now exists (unverified)
+                    st.mail_at = Some(crate::creator::store::now());
                     "new"
                 }
             }
@@ -370,4 +389,28 @@ async fn balance(Ax(st): Ax<Shared>, h: HeaderMap) -> Response {
 async fn event(Ax(st): Ax<Shared>, e: String) -> StatusCode {
     st.lock().unwrap().seen.events.push(e);
     StatusCode::NO_CONTENT
+}
+
+async fn ele_domains() -> Json<serde_json::Value> {
+    Json(json!({ "domains": [{ "domain": "mail.test", "is_active": true }] }))
+}
+
+async fn ele_inbox() -> Response {
+    let n = uuid::Uuid::new_v4().simple().to_string();
+    let body = json!({ "email": format!("u{}@mail.test", &n[..8]), "token": format!("tok{n}") });
+    (StatusCode::CREATED, Json(body)).into_response()
+}
+
+/// The verify mail, once the account exists. The link is the fake site's
+/// (http: the runner's test inbox takes it, see `runner::EleInbox`).
+async fn ele_emails(Ax(st): Ax<Shared>) -> Json<serde_json::Value> {
+    let st = st.lock().unwrap();
+    let mail = st.mail_at.as_ref().map(|at| {
+        json!({
+            "id": "verify-1", "from": "Breeze Blue <noreply@breezeblue.ai>",
+            "subject": "Verify your email", "received_at": at,
+            "html": format!("<p>Hi</p><a href=\"{}/verify?t={VERIFY_TOKEN}\">Verify email</a>", st.site),
+        })
+    });
+    Json(json!({ "emails": mail.into_iter().collect::<Vec<_>>() }))
 }
