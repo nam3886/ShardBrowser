@@ -19,8 +19,10 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use serde_json::json;
 
-use super::errors::error_code;
-use super::mail::{link_pick, wait_for_new_mail, EleClient, MailClient, POLL_INTERVAL};
+use super::errors::{error_code, MAILBOX_GONE};
+use super::mail::{
+    link_pick, wait_for_new_mail, EleClient, MailClient, OutlookClient, OutlookUrls, POLL_INTERVAL,
+};
 use super::providers::breezeblue::{self as bb, Timings, Urls, KEY};
 use super::providers::tts::{Inbox, TtsRun};
 use super::proxy::{self, NoHealthyProxy};
@@ -35,6 +37,8 @@ pub const NO_ADDRESS: &str = "Email has no address";
 pub const NO_PROXY: &str = "No healthy proxy for a new browser";
 /// Never read back by our pages; masked in every stored text.
 pub const SECRET_SETTING: &str = "ele_api_key";
+/// An Ele mailbox while the Ele address or key is not set.
+pub const ELE_UNSET: &str = "Ele API unavailable: ele_api_url / ele_api_key not set";
 
 /// How the run opens, checks and stops an account's browser: Shard's profiles
 /// in the app (`Shard`), a bare test engine in tests.
@@ -77,12 +81,27 @@ impl Browsers for Shard {
 /// What a run needs.
 pub struct Ctx<B> {
     pub db: Arc<Db>,
-    pub ele: EleClient,
+    /// None when the Ele address or key is not set (an Outlook run).
+    pub ele: Option<EleClient>,
+    pub outlook: OutlookClient,
     pub browsers: B,
     pub urls: Urls,
     pub tm: Timings,
     /// Failure screenshots go here as `<account_id>.png`.
     pub screens: PathBuf,
+}
+
+impl<B> Ctx<B> {
+    /// The inbox reader for this mailbox.
+    pub fn mail_for(&self, mb: &Mailbox) -> Result<MailClient<'_>> {
+        if mb.provider == "outlook" {
+            return Ok(MailClient::Outlook(&self.outlook));
+        }
+        self.ele
+            .as_ref()
+            .map(MailClient::Ele)
+            .ok_or_else(|| anyhow!(ELE_UNSET))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -176,17 +195,22 @@ fn proxy_url(p: &Proxy) -> String {
     u.to_string()
 }
 
-/// The account's Ele mailbox as the flow's `Inbox`. A link it hands out is
-/// masked from then on.
-struct EleInbox<'a> {
-    ele: &'a EleClient,
+/// The account's mailbox (Ele or Outlook) as the flow's `Inbox`. A link it
+/// hands out is masked from then on.
+struct MailInbox<'a> {
+    client: MailClient<'a>,
     mailbox: Mailbox,
     scrub: &'a Scrub,
 }
 
-impl Inbox for EleInbox<'_> {
+impl Inbox for MailInbox<'_> {
     fn reuse(&self) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async move { self.ele.reuse_mailbox(&self.mailbox).await.map_err(|e| e.0) })
+        Box::pin(async move {
+            self.client
+                .reuse_mailbox(&self.mailbox)
+                .await
+                .map_err(|e| e.0)
+        })
     }
 
     fn wait_link<'b>(
@@ -201,7 +225,7 @@ impl Inbox for EleInbox<'_> {
             #[cfg(test)]
             let pick = tests::loopback_http(pick);
             let link = wait_for_new_mail(
-                MailClient::Ele(self.ele),
+                self.client,
                 &self.mailbox,
                 timeout,
                 pick,
@@ -277,6 +301,7 @@ async fn attempt<B: Browsers>(cx: &Ctx<B>, id: i64, scrub: &Scrub) -> Result<End
         .ok_or_else(|| anyhow!(NO_ADDRESS))?;
     scrub.add(&mb.email);
     scrub.add(&mb.token);
+    scrub.add(mb.client_id.as_deref().unwrap_or(""));
     let br = db
         .browser_of_mailbox(mb.id)?
         .ok_or_else(|| anyhow!(NO_BROWSER))?;
@@ -306,13 +331,26 @@ async fn attempt<B: Browsers>(cx: &Ctx<B>, id: i64, scrub: &Scrub) -> Result<End
             ..Default::default()
         },
     )?;
+    // A mailbox known dead fails before anything launches (D-M3-2). An
+    // Outlook one is read once, strictly: a dead grant is gone, an error is
+    // the mail service down; mail already there is never the verify mail.
+    if mb.status == "gone" {
+        bail!(MAILBOX_GONE);
+    }
+    let client = cx.mail_for(&mb)?;
+    if let MailClient::Outlook(_) = client {
+        client.check(&mb).await.map_err(|e| anyhow!(e.0))?;
+        if db.mailbox_get(mb.id)?.is_some_and(|m| m.status == "gone") {
+            bail!(MAILBOX_GONE);
+        }
+    }
     let opened = cx.browsers.open(db, br.id, proxy.as_ref()).await?;
     // Nothing below may skip the stop at the end: no `?` from here on.
     let (bid, mid) = (Some(br.id), Some(mb.id));
     let _ = db.event(bid, mid, "info", Some("browser"), "browser opened");
 
-    let inbox = EleInbox {
-        ele: &cx.ele,
+    let inbox = MailInbox {
+        client,
         mailbox: mb.clone(),
         scrub,
     };
@@ -432,12 +470,16 @@ impl RunState {
 pub static RUN: LazyLock<RunState> = LazyLock::new(RunState::default);
 
 /// `count` new Breeze Blue accounts, one after another, under one `jobs` row.
-/// Per account, in this order: an Ele mailbox (its row saved inside), a
-/// proxy, the browser row, the account row (running), then `run_account`.
+/// Per account, in this order: its mailbox (`mailbox_type` "ele": a new Ele
+/// inbox, its row saved inside; "outlook": the next free one, oldest first,
+/// taken once at the start, so fewer free ones make fewer accounts), a proxy
+/// and the browser row (an Outlook mailbox's earlier browser is reused), the
+/// account row (running), then `run_account`.
 pub async fn make_breeze<B: Browsers>(
     cx: &Ctx<B>,
     count: u32,
     proxy_mode: &str,
+    mailbox_type: &str,
     run: &RunState,
 ) -> Vec<Outcome> {
     // `begin_job` made it already (the app's run); tests come without one.
@@ -451,12 +493,21 @@ pub async fn make_breeze<B: Browsers>(
         },
         j => j,
     };
+    let outlook = if mailbox_type == "outlook" {
+        match cx.db.breeze_free_outlook(count.into()) {
+            Ok(ids) => Some(ids),
+            Err(e) => return vec![failed(format!("{e:#}"))],
+        }
+    } else {
+        None
+    };
+    let n = outlook.as_ref().map_or(count as usize, Vec::len);
     let mut out = Vec::new();
-    for _ in 0..count {
+    for i in 0..n {
         if run.stop.load(SeqCst) {
             break;
         }
-        let o = new_account(cx, job, proxy_mode).await;
+        let o = new_account(cx, job, proxy_mode, outlook.as_ref().map(|ids| ids[i])).await;
         let no_proxy = o.error.as_deref() == Some(NO_PROXY);
         out.push(o);
         run.done.fetch_add(1, SeqCst);
@@ -467,20 +518,41 @@ pub async fn make_breeze<B: Browsers>(
     out
 }
 
-async fn new_account<B: Browsers>(cx: &Ctx<B>, job: i64, mode: &str) -> Outcome {
+/// One account on `outlook` (a free mailbox's id), or on a new Ele inbox.
+async fn new_account<B: Browsers>(
+    cx: &Ctx<B>,
+    job: i64,
+    mode: &str,
+    outlook: Option<i64>,
+) -> Outcome {
     let db = &*cx.db;
-    let mb = match cx.ele.create_mailbox().await {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = db.event(None, None, "error", Some("mail"), &e.0);
-            return failed(e.0);
-        }
+    let scrub = Scrub::of(db);
+    let mb_id = match (outlook, &cx.ele) {
+        (Some(id), _) => id,
+        (None, None) => return failed(ELE_UNSET.into()),
+        (None, Some(ele)) => match ele.create_mailbox().await {
+            Ok(m) => m.id,
+            Err(e) => {
+                let _ = db.event(None, None, "error", Some("mail"), &e.0);
+                return failed(e.0);
+            }
+        },
     };
-    let picked = proxy::pick_proxy(db, mode, "");
+    let has_browser = match db.browser_of_mailbox(mb_id) {
+        Ok(b) => b.is_some(),
+        Err(e) => return failed(err_line(&e, &scrub)),
+    };
+    let picked = if has_browser {
+        Ok(None)
+    } else {
+        proxy::pick_proxy(db, mode, "")
+    };
     let rows = (|| -> Result<i64> {
-        let proxy_id = picked.as_ref().ok().and_then(|p| p.as_ref().map(|p| p.id));
-        db.browser_create(mb.id, proxy_id, mode)?;
-        let id = db.account_create(mb.id, KEY, "email", Some(job))?;
+        if !has_browser {
+            let proxy_id = picked.as_ref().ok().and_then(|p| p.as_ref().map(|p| p.id));
+            db.browser_create(mb_id, proxy_id, mode)?;
+        }
+        let id = db.account_create(mb_id, KEY, "email", Some(job))?;
         db.account_update(
             id,
             &AccountPatch {
@@ -491,7 +563,6 @@ async fn new_account<B: Browsers>(cx: &Ctx<B>, job: i64, mode: &str) -> Outcome 
         )?;
         Ok(id)
     })();
-    let scrub = Scrub::of(db);
     let id = match rows {
         Ok(id) => id,
         Err(e) => return failed(err_line(&e, &scrub)),
@@ -563,20 +634,44 @@ pub fn ele_client(db: &Arc<Db>) -> Result<EleClient> {
     )?)
 }
 
-/// Start a Make run in the background (`breeze_run`).
-pub fn start(count: u32, proxy_mode: String) -> Result<()> {
+/// A Make run's checks: the count, the proxy mode, the route
+/// (`email:ele` | `email:outlook`) and, on Outlook, enough free mailboxes.
+/// Answers the mailbox type.
+pub fn check_start(db: &Db, count: u32, proxy_mode: &str, route: &str) -> Result<&'static str> {
     if !(1..=20).contains(&count) {
         bail!("count must be 1-20");
     }
-    if !["none", "rotate", "least"].contains(&proxy_mode.as_str()) {
+    if !["none", "rotate", "least"].contains(&proxy_mode) {
         bail!("unknown proxy mode: {proxy_mode}");
     }
+    let kind = match route {
+        "email:ele" => "ele",
+        "email:outlook" => "outlook",
+        _ => bail!("unknown route: {route}"),
+    };
+    if kind == "outlook" {
+        let free = db.breeze_free_outlook_count()?;
+        if i64::from(count) > free {
+            bail!("Only {free} free emails on this route");
+        }
+    }
+    Ok(kind)
+}
+
+/// Start a Make run in the background (`breeze_run`).
+pub fn start(count: u32, proxy_mode: String, route: &str) -> Result<()> {
     let db = db()?;
-    let ele = ele_client(&db)?;
+    let kind = check_start(&db, count, &proxy_mode, route)?;
+    let ele = match kind {
+        "ele" => Some(ele_client(&db)?),
+        _ => None,
+    };
+    let outlook = OutlookClient::new(db.clone(), OutlookUrls::live())?;
     let screens = screens_dir()?;
     let cx = Ctx {
         db,
         ele,
+        outlook,
         browsers: Shard,
         urls: Urls::live(),
         tm: Timings::default(),
@@ -585,7 +680,7 @@ pub fn start(count: u32, proxy_mode: String) -> Result<()> {
     begin_job(&cx.db, &RUN, count, &proxy_mode)?;
     tokio::spawn(async move {
         let _end = EndRun;
-        make_breeze(&cx, count, &proxy_mode, &RUN).await;
+        make_breeze(&cx, count, &proxy_mode, kind, &RUN).await;
     });
     Ok(())
 }

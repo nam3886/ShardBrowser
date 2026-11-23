@@ -9,7 +9,17 @@
 //! CREATOR_LIVE_IMPORT=<copy of ghidorah.sqlite> # proxies, blocked domains, Ele settings
 //! CREATOR_LIVE_OUT=<dir>                        # our store (kept between runs) + screenshots
 //! CREATOR_LIVE_COUNT=1 CREATOR_LIVE_PROXY_MODE=rotate
-//! cargo test --lib creator::runner::live -- --ignored --nocapture
+//! CREATOR_LIVE_MAILBOX=ele                      # or outlook: the store's free ones, oldest first
+//! cargo test --lib creator::runner::live::live_breeze -- --ignored --nocapture
+//! ```
+//!
+//! `live_outlook_test` (M3 live gate) pastes Outlook combo lines from a file
+//! into the same store and tests each new mailbox once, 5 at a time, as the
+//! Emails page's Test does:
+//!
+//! ```text
+//! CREATOR_LIVE_OUT=<dir> CREATOR_LIVE_OUTLOOK=<file of combo lines>
+//! cargo test --lib creator::runner::live::live_outlook_test -- --ignored --nocapture
 //! ```
 //!
 //! Prints per account its status, error code, seconds and events (stored
@@ -60,8 +70,13 @@ async fn live_breeze() {
     }
     let count: u32 = std::env::var("CREATOR_LIVE_COUNT").map_or(1, |v| v.parse().unwrap());
     let mode = std::env::var("CREATOR_LIVE_PROXY_MODE").unwrap_or_else(|_| "rotate".into());
+    let mailbox = std::env::var("CREATOR_LIVE_MAILBOX").unwrap_or_else(|_| "ele".into());
     let cx = Ctx {
-        ele: ele_client(&db).unwrap(),
+        ele: match mailbox.as_str() {
+            "ele" => Some(ele_client(&db).unwrap()),
+            _ => None,
+        },
+        outlook: OutlookClient::new(db.clone(), OutlookUrls::live()).unwrap(),
         db: db.clone(),
         browsers: Shard,
         urls: Urls::live(),
@@ -70,7 +85,7 @@ async fn live_breeze() {
     };
     let run = RunState::default();
     let job = begin_job(&db, &run, count, &mode).unwrap();
-    make_breeze(&cx, count, &mode, &run).await;
+    make_breeze(&cx, count, &mode, &mailbox, &run).await;
     run.end();
 
     let mut accts: Vec<_> = db

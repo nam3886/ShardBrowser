@@ -631,6 +631,52 @@ impl Db {
         Ok(out)
     }
 
+    /// The WHERE (alias `m`) of the Outlook mailboxes free for a Breeze Blue
+    /// account (Python `_email_conds` + `_taken` for the email route, the
+    /// provider fixed to Outlook): active, domain not blocked, a token and a
+    /// client id, no Breeze account made, in progress or frozen on it, and
+    /// none failed with a code no retry fixes.
+    // ponytail: no count cache (Python caches by table revisions); the
+    // 500k perf test says whether one is needed.
+    pub fn breeze_free_outlook_where() -> (String, Vec<rusqlite::types::Value>) {
+        use rusqlite::types::Value as V;
+        let fatal = super::errors::NOT_RETRYABLE;
+        let sql = format!(
+            "m.provider='outlook' AND m.status='active' \
+             AND lower(m.domain) NOT IN (SELECT domain FROM blocked_domains) \
+             AND m.token<>'' AND COALESCE(m.client_id,'')<>'' \
+             AND m.id NOT IN (SELECT mailbox_id FROM accounts WHERE platform=? \
+             AND ((status<>'failed' OR frozen=1) OR (status='failed' AND error_code IN ({}))))",
+            vec!["?"; fatal.len()].join(",")
+        );
+        let mut args = vec![V::Text(super::providers::breezeblue::KEY.into())];
+        args.extend(fatal.iter().map(|c| V::Text((*c).into())));
+        (sql, args)
+    }
+
+    /// Free Outlook mailboxes for Breeze Blue, oldest first.
+    pub fn breeze_free_outlook(&self, limit: i64) -> Result<Vec<i64>> {
+        let (w, mut args) = Self::breeze_free_outlook_where();
+        args.push(rusqlite::types::Value::Integer(limit));
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT m.id FROM mailboxes m WHERE {w} ORDER BY m.id LIMIT ?"
+        ))?;
+        let ids = st
+            .query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
+    pub fn breeze_free_outlook_count(&self) -> Result<i64> {
+        let (w, args) = Self::breeze_free_outlook_where();
+        Ok(self.c().query_row(
+            &format!("SELECT COUNT(*) FROM mailboxes m WHERE {w}"),
+            rusqlite::params_from_iter(&args),
+            |r| r.get(0),
+        )?)
+    }
+
     /// Outlook's rotated refresh token.
     pub fn mailbox_set_token(&self, id: i64, token: &str) -> Result<()> {
         self.c().execute(

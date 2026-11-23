@@ -39,7 +39,8 @@ pub async fn call(cmd: &str, args: &Value) -> Option<Result<Value>> {
         "breeze_run" => {
             let count = args["count"].as_u64().unwrap_or(0).min(u32::MAX.into()) as u32;
             let mode = args["proxy_mode"].as_str().unwrap_or("rotate").to_string();
-            runner::start(count, mode).map(|()| Value::Null)
+            let route = args["route"].as_str().unwrap_or("email:ele");
+            runner::start(count, mode, route).map(|()| Value::Null)
         }
         "breeze_stop" => {
             RUN.stop.store(true, SeqCst);
@@ -47,9 +48,8 @@ pub async fn call(cmd: &str, args: &Value) -> Option<Result<Value>> {
         }
         "run_state" => runner::db().and_then(|db| run_state(&db, &RUN)),
         "make_check" => runner::db().and_then(|db| make_check(&db, args)),
-        // Ele makes a new mailbox for each account: no count of free ones (null).
-        "make_options" => Ok(json!({ "email:ele": null })),
-        "platforms" => Ok(json!([breeze_card()])),
+        "make_options" => runner::db().and_then(|db| make_options(&db)),
+        "platforms" => runner::db().and_then(|db| Ok(json!([breeze_card(&db)?]))),
         "nav_counts" => runner::db().and_then(|db| {
             let (accounts, emails, proxies) = db.nav_counts()?;
             Ok(json!({ "accounts": accounts, "emails": emails, "platforms": 1, "proxies": proxies }))
@@ -69,13 +69,19 @@ pub async fn call(cmd: &str, args: &Value) -> Option<Result<Value>> {
     })
 }
 
-/// `PlatformCard` for Breeze Blue, the one platform M2 makes.
-fn breeze_card() -> Value {
-    json!({
+/// `PlatformCard` for Breeze Blue, the one platform made so far; `free` is
+/// its free Outlook mailboxes (Ele makes a new one per account).
+fn breeze_card(db: &Db) -> Result<Value> {
+    Ok(json!({
         "key": KEY, "label": "Breeze Blue", "category": "voice", "ready": true, "routes": ["email"],
         "account_rule": "separate", "rule_fixed": false, "starred": true, "secrets": ["api_key"],
-        "free": 0, "options": [],
-    })
+        "free": db.breeze_free_outlook_count()?, "options": [],
+    }))
+}
+
+/// Free emails per route: Ele makes a new mailbox for each account (null).
+fn make_options(db: &Db) -> Result<Value> {
+    Ok(json!({ "email:ele": null, "email:outlook": db.breeze_free_outlook_count()? }))
 }
 
 /// `AccountList`: `tab` (platform), `status` (group), `flag`, `q`, `order`,
@@ -148,7 +154,8 @@ fn run_state(db: &Db, run: &RunState) -> Result<Value> {
 /// `MakeBlock[]`: why Make cannot start now, in the order they are said.
 fn make_check(db: &Db, args: &Value) -> Result<Value> {
     let mut out = vec![];
-    if !ele_set(db)? {
+    let ele_route = args["route"].as_str().is_none_or(|r| r == "email:ele");
+    if ele_route && !ele_set(db)? {
         out.push("NO_ELE_KEY");
     }
     if engine_busy() {
@@ -378,6 +385,24 @@ mod tests {
             json!({ "code": "CAPTCHA_UNSOLVED", "group": "captcha", "retryable": true })
         );
         assert_eq!(failed["tabs"], json!([{ "platform": KEY, "count": 3 }]));
+    }
+
+    #[test]
+    fn make_options_counts_free_outlook() {
+        let (db, _f) = temp_db();
+        assert_eq!(
+            make_options(&db).unwrap(),
+            json!({ "email:ele": null, "email:outlook": 0 })
+        );
+        db.import_outlook("a@outlook.example|pw|T|C|r\nb@outlook.example|pw|T|C|r")
+            .unwrap();
+        assert_eq!(make_options(&db).unwrap()["email:outlook"], 2);
+        assert_eq!(breeze_card(&db).unwrap()["free"], 2);
+        assert_eq!(keys(&breeze_card(&db).unwrap()), fields("PlatformCard"));
+        // No Ele key: blocks the Ele route only.
+        let blocks = |route: &str| make_check(&db, &json!({ "route": route, "proxy": "none" })).unwrap();
+        assert!(blocks("email:ele").as_array().unwrap().contains(&json!("NO_ELE_KEY")));
+        assert!(!blocks("email:outlook").as_array().unwrap().contains(&json!("NO_ELE_KEY")));
     }
 
     #[test]
