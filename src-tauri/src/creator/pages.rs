@@ -116,7 +116,10 @@ fn mails_json(items: &[MailMessage]) -> Value {
         items
             .iter()
             .map(|m| {
-                let (subject, body) = (m.subject.as_deref().unwrap_or(""), m.body.as_deref().unwrap_or(""));
+                let (subject, body) = (
+                    m.subject.as_deref().unwrap_or(""),
+                    m.body.as_deref().unwrap_or(""),
+                );
                 json!({
                     "id": m.id, "sender": m.sender.as_deref().unwrap_or(""), "subject": subject,
                     "body": body, "received_at": m.received_at.as_deref().unwrap_or(""),
@@ -151,7 +154,9 @@ pub(crate) async fn email_detail(
     outlook: &OutlookClient,
     id: i64,
 ) -> Result<Value> {
-    let mb = db.mailbox_get(id)?.ok_or_else(|| anyhow!("Email not found"))?;
+    let mb = db
+        .mailbox_get(id)?
+        .ok_or_else(|| anyhow!("Email not found"))?;
     let client = match (mb.provider.as_str(), ele) {
         ("outlook", _) => Some(MailClient::Outlook(outlook)),
         (_, Some(e)) => Some(MailClient::Ele(e)),
@@ -162,7 +167,9 @@ pub(crate) async fn email_detail(
             let _ = tokio::time::timeout(TEST_TIMEOUT, c.poll_inbox(&mb)).await;
         }
     }
-    let mut row = db.email_row(id)?.ok_or_else(|| anyhow!("Email not found"))?;
+    let mut row = db
+        .email_row(id)?
+        .ok_or_else(|| anyhow!("Email not found"))?;
     let (items, more) = db.email_mail_page(id, None)?;
     let technical = match db.browser_of_mailbox(id)? {
         Some(b) => {
@@ -724,8 +731,13 @@ mod tests {
     }
 
     fn outlook_row(db: &Db, email: &str, rt: &str) -> i64 {
-        db.import_outlook(&format!("{email}|pw|{rt}|{CID}|r")).unwrap();
-        db.email_ids(&EmailQuery::default()).unwrap().into_iter().max().unwrap()
+        db.import_outlook(&format!("{email}|pw|{rt}|{CID}|r"))
+            .unwrap();
+        db.email_ids(&EmailQuery::default())
+            .unwrap()
+            .into_iter()
+            .max()
+            .unwrap()
     }
 
     fn set_account(db: &Db, mb: i64, platform: &str, status: &str) -> i64 {
@@ -746,12 +758,21 @@ mod tests {
         let ol = OutlookClient::new(db.clone(), OutlookUrls::on(&srv.site)).unwrap();
         let mb = outlook_row(&db, "a@outlook.example", RT);
         set_account(&db, mb, KEY, "linked");
-        db.mail_create(mb, &store::NewMail { subject: "s".into(), ..Default::default() })
-            .unwrap();
+        db.mail_create(
+            mb,
+            &store::NewMail {
+                subject: "s".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let list = db.email_list(&email_query(&json!({}))).unwrap();
         assert_eq!(keys(&list), fields("EmailList"));
         assert_eq!(keys(&list["items"][0]), fields("EmailRow"));
-        assert_eq!(keys(&list["items"][0]["accounts"][0]), BTreeSet::from(["platform", "status", "verify_status"].map(String::from)));
+        assert_eq!(
+            keys(&list["items"][0]["accounts"][0]),
+            BTreeSet::from(["platform", "status", "verify_status"].map(String::from))
+        );
         assert_eq!(
             keys(&list["counts"]),
             BTreeSet::from(["all", "outlook", "ele"].map(String::from))
@@ -781,20 +802,51 @@ mod tests {
         let q = |a: Value| db.email_list(&email_query(&a)).unwrap();
         let all = q(json!({}));
         assert_eq!(all["counts"], json!({ "all": 8, "outlook": 5, "ele": 3 }));
-        assert_eq!((all["total"].as_i64(), all["items"][0]["id"].as_i64()), (Some(8), Some(8)));
+        assert_eq!(
+            (all["total"].as_i64(), all["items"][0]["id"].as_i64()),
+            (Some(8), Some(8))
+        );
         let ol = q(json!({ "kind": "outlook", "order": "oldest", "limit": 2, "offset": 1 }));
         assert_eq!(ol["total"], 5);
         assert_eq!(ol["counts"]["all"], 8, "type counts ignore the type filter");
-        let ids: Vec<i64> = ol["items"].as_array().unwrap().iter().map(|r| r["id"].as_i64().unwrap()).collect();
+        let ids: Vec<i64> = ol["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
         assert_eq!(ids, [2, 3]);
         let gone = q(json!({ "status": "gone" }));
-        assert_eq!((gone["total"].as_i64(), gone["counts"]["ele"].as_i64()), (Some(1), Some(0)));
-        assert_eq!(q(json!({ "q": "O1_" }))["total"], 1, "case-insensitive, `_` literal");
+        assert_eq!(
+            (gone["total"].as_i64(), gone["counts"]["ele"].as_i64()),
+            (Some(1), Some(0))
+        );
+        assert_eq!(
+            q(json!({ "q": "O1_" }))["total"],
+            1,
+            "case-insensitive, `_` literal"
+        );
         assert_eq!(q(json!({ "q": "%" }))["total"], 0);
-        assert_eq!(q(json!({ "order": "email" }))["items"][0]["email"], "e0@ele.example");
-        assert_eq!(q(json!({ "limit": 0 }))["items"].as_array().unwrap().len(), 1);
-        assert_eq!(q(json!({ "limit": 1000 }))["items"].as_array().unwrap().len(), 8);
-        assert_eq!(db.email_ids(&email_query(&json!({ "kind": "ele" }))).unwrap(), [6, 7, 8]);
+        assert_eq!(
+            q(json!({ "order": "email" }))["items"][0]["email"],
+            "e0@ele.example"
+        );
+        assert_eq!(
+            q(json!({ "limit": 0 }))["items"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            q(json!({ "limit": 1000 }))["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        assert_eq!(
+            db.email_ids(&email_query(&json!({ "kind": "ele" })))
+                .unwrap(),
+            [6, 7, 8]
+        );
     }
 
     #[test]
@@ -803,12 +855,27 @@ mod tests {
         let free = outlook_row(&db, "a@outlook.example", RT);
         let taken = outlook_row(&db, "b@outlook.example", RT);
         set_account(&db, taken, KEY, "linked");
-        db.mailbox_create("ele", "e@ele.example", "ele.example", "t").unwrap();
-        let ff = |k: &str| db.email_list(&email_query(&json!({ "free_for": k }))).unwrap();
+        db.mailbox_create("ele", "e@ele.example", "ele.example", "t")
+            .unwrap();
+        let ff = |k: &str| {
+            db.email_list(&email_query(&json!({ "free_for": k })))
+                .unwrap()
+        };
         let b = ff(KEY);
-        assert_eq!((b["total"].as_i64(), b["items"][0]["id"].as_i64()), (Some(1), Some(free)));
-        assert_eq!(ff("google")["total"], 0, "no other platform has free emails yet");
-        assert_eq!(db.email_ids(&email_query(&json!({ "free_for": KEY }))).unwrap(), [free]);
+        assert_eq!(
+            (b["total"].as_i64(), b["items"][0]["id"].as_i64()),
+            (Some(1), Some(free))
+        );
+        assert_eq!(
+            ff("google")["total"],
+            0,
+            "no other platform has free emails yet"
+        );
+        assert_eq!(
+            db.email_ids(&email_query(&json!({ "free_for": KEY })))
+                .unwrap(),
+            [free]
+        );
     }
 
     #[tokio::test]
@@ -820,7 +887,10 @@ mod tests {
         let idle = outlook_row(&db, "a@outlook.example", RT);
         let d = email_detail(&db, None, &ol, idle).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!((d["mails"].as_i64(), d["items"][0]["code"].as_str()), (Some(1), Some("482913")));
+        assert_eq!(
+            (d["mails"].as_i64(), d["items"][0]["code"].as_str()),
+            (Some(1), Some("482913"))
+        );
         let gone = outlook_row(&db, "b@outlook.example", RT);
         db.mailbox_set_status(gone, "gone").unwrap();
         let running = outlook_row(&db, "c@outlook.example", RT);
@@ -832,8 +902,14 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "not polled");
         // A failed read still shows the stored mail.
         let down = outlook_row(&db, "d@outlook.example", "RT-DOWN");
-        db.mail_create(down, &store::NewMail { subject: "kept".into(), ..Default::default() })
-            .unwrap();
+        db.mail_create(
+            down,
+            &store::NewMail {
+                subject: "kept".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let d = email_detail(&db, None, &ol, down).await.unwrap();
         assert_eq!(d["items"][0]["subject"], "kept");
         assert!(email_detail(&db, None, &ol, 999).await.is_err());
@@ -842,7 +918,9 @@ mod tests {
     #[test]
     fn email_mail_pages_by_cursor_without_shift() {
         let (db, _f) = temp_db();
-        let mb = db.mailbox_create("ele", "a@ele.example", "ele.example", "t").unwrap();
+        let mb = db
+            .mailbox_create("ele", "a@ele.example", "ele.example", "t")
+            .unwrap();
         let add = |i: u32| {
             db.mail_create(
                 mb.id,
@@ -885,16 +963,30 @@ mod tests {
         db.mailbox_set_status(down_gone, "gone").unwrap();
         let busy = outlook_row(&db, "d@outlook.example", RT);
         set_account(&db, busy, KEY, "running");
-        let ele_ok = db.mailbox_create("ele", "e@ele.example", "ele.example", "tok").unwrap().id;
-        let ele_404 = db.mailbox_create("ele", "f@ele.example", "ele.example", "gone-tok").unwrap().id;
+        let ele_ok = db
+            .mailbox_create("ele", "e@ele.example", "ele.example", "tok")
+            .unwrap()
+            .id;
+        let ele_404 = db
+            .mailbox_create("ele", "f@ele.example", "ele.example", "gone-tok")
+            .unwrap()
+            .id;
         let t = |id, ele: Option<&EleClient>| test_one(&db, ele, &ol, id);
         assert_eq!(t(active, None).await, "active");
         assert_eq!(t(dead, None).await, "gone");
         assert_eq!(db.mailbox_get(dead).unwrap().unwrap().status, "gone");
-        assert_eq!(t(down_gone, None).await, "failed", "a failure is never gone");
+        assert_eq!(
+            t(down_gone, None).await,
+            "failed",
+            "a failure is never gone"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(t(busy, None).await, "active");
-        assert_eq!(calls.load(Ordering::SeqCst), 3, "a running mailbox is not read");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "a running mailbox is not read"
+        );
         assert_eq!(t(ele_ok, Some(&ele)).await, "active");
         assert_eq!(t(ele_404, Some(&ele)).await, "gone");
         assert_eq!(t(ele_ok, None).await, "failed", "Ele not set");
@@ -907,13 +999,16 @@ mod tests {
         let db = Arc::new(db);
         let (srv, _) = fakes().await;
         let ol = OutlookClient::new(db.clone(), OutlookUrls::on(&srv.site)).unwrap();
-        let text = format!("a@outlook.example|pw|{RT}|{CID}|r\na@outlook.example|pw|{RT}|{CID}|r\nbad {RT} {CID}");
+        let text = format!(
+            "a@outlook.example|pw|{RT}|{CID}|r\na@outlook.example|pw|{RT}|{CID}|r\nbad {RT} {CID}"
+        );
         let mb = outlook_row(&db, "z@outlook.example", RT);
         set_account(&db, mb, KEY, "failed");
         let answers = [
             add_outlook(&db, &json!({ "text": text })).unwrap(),
             db.email_list(&email_query(&json!({}))).unwrap(),
-            db.email_list(&email_query(&json!({ "free_for": KEY }))).unwrap(),
+            db.email_list(&email_query(&json!({ "free_for": KEY })))
+                .unwrap(),
             json!(db.email_ids(&email_query(&json!({}))).unwrap()),
             email_detail(&db, None, &ol, mb).await.unwrap(),
             json!(test_one(&db, None, &ol, mb).await),
@@ -951,7 +1046,10 @@ mod tests {
         }
         let r = add_ele(&dead, 3).await.unwrap();
         assert_eq!(r["created"], 0);
-        assert!(r["error"].as_str().unwrap().starts_with("Ele API unavailable"));
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Ele API unavailable"));
     }
 
     /// 500,000 mailboxes and 1,000 accounts: the first window with its

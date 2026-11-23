@@ -1188,7 +1188,9 @@ impl Db {
             args.push(rusqlite::types::Value::Text(k.clone()));
         }
         let c = self.c();
-        let mut st = c.prepare(&format!("SELECT m.id FROM mailboxes m WHERE {wh} ORDER BY m.id"))?;
+        let mut st = c.prepare(&format!(
+            "SELECT m.id FROM mailboxes m WHERE {wh} ORDER BY m.id"
+        ))?;
         let ids = st
             .query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
