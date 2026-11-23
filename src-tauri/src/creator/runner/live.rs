@@ -127,3 +127,44 @@ async fn live_breeze() {
         accts.iter().filter(|a| a.status == "linked").count()
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn live_outlook_test() {
+    let out = PathBuf::from(env("CREATOR_LIVE_OUT"));
+    std::fs::create_dir_all(&out).unwrap();
+    let db = Arc::new(Db::open(&out.join("creator.sqlite")).unwrap());
+    let text = std::fs::read_to_string(env("CREATOR_LIVE_OUTLOOK")).unwrap();
+    let outlook_ids = || {
+        let q = store::EmailQuery {
+            kind: Some("outlook".into()),
+            ..Default::default()
+        };
+        db.email_ids(&q).unwrap()
+    };
+    let before = outlook_ids();
+    let r = db.import_outlook(&text).unwrap();
+    eprintln!(
+        "IMPORT added={} duplicates={} invalid={}",
+        r.added,
+        r.duplicates.len(),
+        r.invalid.len()
+    );
+    let new: Vec<i64> = outlook_ids()
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    let outlook = OutlookClient::new(db.clone(), OutlookUrls::live()).unwrap();
+    use futures_util::StreamExt;
+    let states: Vec<&str> = futures_util::stream::iter(new.iter().copied())
+        .map(|id| crate::creator::pages::test_one(&db, None, &outlook, id))
+        .buffered(5)
+        .collect()
+        .await;
+    for (id, st) in new.iter().zip(&states) {
+        eprintln!("MAILBOX {id} {st}");
+    }
+    for s in ["active", "gone", "failed"] {
+        eprintln!("TOTAL {s}={}", states.iter().filter(|x| *x == s).count());
+    }
+}

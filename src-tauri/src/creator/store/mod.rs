@@ -302,6 +302,31 @@ pub struct AccountQuery {
     pub limit: i64,
 }
 
+/// The Emails list's filters (`email_list`, `email_ids`).
+#[derive(Debug, Clone, Default)]
+pub struct EmailQuery {
+    /// `outlook` | `ele`.
+    pub kind: Option<String>,
+    /// `active` | `gone`.
+    pub status: Option<String>,
+    /// A platform key: only `breezeblue` has free emails so far.
+    pub free_for: Option<String>,
+    pub q: String,
+    /// `newest` (default), `oldest`, `email`.
+    pub order: String,
+    pub offset: i64,
+    pub limit: i64,
+}
+
+type MailCounts = std::collections::HashMap<i64, i64>;
+type AccountsOf = std::collections::HashMap<i64, Vec<serde_json::Value>>;
+
+/// Account states a run is on (Python `engine.LIVE`).
+pub const LIVE: [&str; 3] = ["queued", "running", "waiting"];
+
+/// Python `MAIL_PAGE`: mails per Peek page.
+pub const MAIL_PAGE: i64 = 50;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub id: i64,
@@ -1013,6 +1038,202 @@ impl Db {
         Ok(
             json!({ "items": items, "total": total, "offset": f.offset, "tabs": tabs, "counts": counts }),
         )
+    }
+
+    /// The WHERE (alias `m`) of the Emails filters but type.
+    fn email_where(f: &EmailQuery) -> (String, Vec<rusqlite::types::Value>) {
+        use rusqlite::types::Value as V;
+        let mut wh = vec!["1=1".to_string()];
+        let mut args: Vec<V> = Vec::new();
+        if let Some(s) = &f.status {
+            wh.push("m.status=?".into());
+            args.push(V::Text(s.clone()));
+        }
+        match f.free_for.as_deref() {
+            None => {}
+            Some(super::providers::breezeblue::KEY) => {
+                let (w, a) = Self::breeze_free_outlook_where();
+                wh.push(format!("({w})"));
+                args.extend(a);
+            }
+            // No other platform is made yet: nothing is free for it.
+            Some(_) => wh.push("0".into()),
+        }
+        let q = f.q.trim();
+        if !q.is_empty() {
+            let esc = q
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            wh.push("m.email LIKE ? ESCAPE '\\'".into());
+            args.push(V::Text(format!("%{esc}%")));
+        }
+        (wh.join(" AND "), args)
+    }
+
+    /// One window of the Emails list (`EmailList` in `src/creator/types.ts`):
+    /// the rows (never a token or client id), the total under the filters,
+    /// the count per type (every filter but type, one `GROUP BY`). Mail
+    /// counts and accounts are read for the window's ids only.
+    pub fn email_list(&self, f: &EmailQuery) -> Result<serde_json::Value> {
+        use rusqlite::types::Value as V;
+        use serde_json::json;
+        let (wh, mut args) = Self::email_where(f);
+        let c = self.c();
+        let mut counts = json!({ "all": 0, "outlook": 0, "ele": 0 });
+        {
+            let mut st = c.prepare(&format!(
+                "SELECT m.provider, COUNT(*) FROM mailboxes m WHERE {wh} GROUP BY 1"
+            ))?;
+            let mut rows = st.query(rusqlite::params_from_iter(&args))?;
+            let mut all = 0;
+            while let Some(r) = rows.next()? {
+                let (k, n): (String, i64) = (r.get(0)?, r.get(1)?);
+                all += n;
+                if counts.get(&k).is_some() {
+                    counts[k] = n.into();
+                }
+            }
+            counts["all"] = all.into();
+        }
+        let mut wh = wh;
+        let total = match &f.kind {
+            Some(k) => {
+                wh.push_str(" AND m.provider=?");
+                args.push(V::Text(k.clone()));
+                counts.get(k).and_then(|v| v.as_i64()).unwrap_or(0)
+            }
+            None => counts["all"].as_i64().unwrap_or(0),
+        };
+        let order = match f.order.as_str() {
+            "oldest" => "m.id",
+            "email" => "m.email, m.id",
+            _ => "m.id DESC",
+        };
+        args.push(V::Integer(f.limit));
+        args.push(V::Integer(f.offset));
+        let rows: Vec<(i64, String, String, String, String)> = c
+            .prepare(&format!(
+                "SELECT m.id, m.email, m.provider, m.status, m.created_at FROM mailboxes m \
+                 WHERE {wh} ORDER BY {order} LIMIT ? OFFSET ?"
+            ))?
+            .query_map(rusqlite::params_from_iter(&args), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+        let (mails, accounts) = Self::mails_and_accounts(&c, &ids)?;
+        let items: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(id, email, provider, status, created_at)| {
+                json!({
+                    "id": id, "email": email, "provider": provider, "status": status,
+                    "mails": mails.get(&id).copied().unwrap_or(0), "created_at": created_at,
+                    "accounts": accounts.get(&id).cloned().unwrap_or_default(),
+                })
+            })
+            .collect();
+        Ok(json!({ "items": items, "total": total, "offset": f.offset, "counts": counts }))
+    }
+
+    /// Mail count and accounts (`{platform, status, verify_status}`, oldest
+    /// first) of these mailboxes.
+    fn mails_and_accounts(c: &Connection, ids: &[i64]) -> Result<(MailCounts, AccountsOf)> {
+        let (mut mails, mut accounts) = (MailCounts::new(), AccountsOf::new());
+        if ids.is_empty() {
+            return Ok((mails, accounts));
+        }
+        let marks = vec!["?"; ids.len()].join(",");
+        let mut st = c.prepare(&format!(
+            "SELECT mailbox_id, COUNT(*) FROM mail_messages WHERE mailbox_id IN ({marks}) GROUP BY mailbox_id"
+        ))?;
+        let mut rows = st.query(rusqlite::params_from_iter(ids))?;
+        while let Some(r) = rows.next()? {
+            mails.insert(r.get(0)?, r.get(1)?);
+        }
+        let mut st = c.prepare(&format!(
+            "SELECT mailbox_id, platform, status, verify_status FROM accounts WHERE mailbox_id IN ({marks}) ORDER BY id"
+        ))?;
+        let mut rows = st.query(rusqlite::params_from_iter(ids))?;
+        while let Some(r) = rows.next()? {
+            let v = serde_json::json!({
+                "platform": r.get::<_, String>(1)?,
+                "status": r.get::<_, String>(2)?,
+                "verify_status": r.get::<_, Option<String>>(3)?,
+            });
+            accounts.entry(r.get(0)?).or_insert_with(Vec::new).push(v);
+        }
+        Ok((mails, accounts))
+    }
+
+    /// One mailbox as an `EmailRow` (no token, no client id); None when gone.
+    pub fn email_row(&self, id: i64) -> Result<Option<serde_json::Value>> {
+        let Some(mb) = self.mailbox_get(id)? else {
+            return Ok(None);
+        };
+        let (mails, accounts) = Self::mails_and_accounts(&self.c(), &[id])?;
+        Ok(Some(serde_json::json!({
+            "id": mb.id, "email": mb.email, "provider": mb.provider, "status": mb.status,
+            "mails": mails.get(&id).copied().unwrap_or(0), "created_at": mb.created_at,
+            "accounts": accounts.get(&id).cloned().unwrap_or_default(),
+        })))
+    }
+
+    /// Every id matching the filters (type included), for "Test all" and
+    /// select-all: ids only.
+    pub fn email_ids(&self, f: &EmailQuery) -> Result<Vec<i64>> {
+        let (mut wh, mut args) = Self::email_where(f);
+        if let Some(k) = &f.kind {
+            wh.push_str(" AND m.provider=?");
+            args.push(rusqlite::types::Value::Text(k.clone()));
+        }
+        let c = self.c();
+        let mut st = c.prepare(&format!("SELECT m.id FROM mailboxes m WHERE {wh} ORDER BY m.id"))?;
+        let ids = st
+            .query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
+    /// Whether a run is on an account of this mailbox (it polls the inbox itself).
+    pub fn mailbox_busy(&self, id: i64) -> Result<bool> {
+        Ok(self.c().query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE mailbox_id=? AND status IN ('{}'))",
+                LIVE.join("','")
+            ),
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The newest `MAIL_PAGE` stored mails of a mailbox, older than
+    /// `before_id` when given (Python `_mail_page`'s cursor: new mail landing
+    /// on top never shifts or repeats a row), and whether more remain.
+    pub fn email_mail_page(
+        &self,
+        mailbox_id: i64,
+        before_id: Option<i64>,
+    ) -> Result<(Vec<MailMessage>, bool)> {
+        let c = self.c();
+        let mut sql = format!("SELECT {MAIL} FROM mail_messages WHERE mailbox_id=?1");
+        if before_id.is_some() {
+            sql.push_str(
+                " AND (COALESCE(received_at, ''), id) < (SELECT COALESCE(received_at, ''), id \
+                 FROM mail_messages WHERE id=?2 AND mailbox_id=?1)",
+            );
+        }
+        sql.push_str(" ORDER BY COALESCE(received_at, '') DESC, id DESC LIMIT ?3");
+        let mut st = c.prepare(&sql)?;
+        let mut rows: Vec<MailMessage> = st
+            .query_map(
+                params![mailbox_id, before_id.unwrap_or(0), MAIL_PAGE + 1],
+                mail,
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        let more = rows.len() as i64 > MAIL_PAGE;
+        rows.truncate(MAIL_PAGE as usize);
+        Ok((rows, more))
     }
 
     /// A Make run's progress: linked and failed accounts of `job`, and the

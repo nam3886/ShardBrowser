@@ -594,6 +594,18 @@ pub fn db() -> Result<Arc<Db>> {
     Ok(db)
 }
 
+static OUTLOOK: std::sync::OnceLock<OutlookClient> = std::sync::OnceLock::new();
+
+/// The pages' Outlook client on our store (one connection pool, so a Test
+/// all reuses it).
+pub fn outlook() -> Result<&'static OutlookClient> {
+    if let Some(c) = OUTLOOK.get() {
+        return Ok(c);
+    }
+    let c = OutlookClient::new(db()?, OutlookUrls::live())?;
+    Ok(OUTLOOK.get_or_init(|| c))
+}
+
 /// Ends the app's run when the spawned task ends, a panic included.
 struct EndRun;
 
