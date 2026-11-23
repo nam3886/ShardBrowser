@@ -168,3 +168,41 @@ async fn live_outlook_test() {
         eprintln!("TOTAL {s}={}", states.iter().filter(|x| **x == s).count());
     }
 }
+
+/// Task 5's dev run on the Windows test box: our commands (`pages::call`) on a
+/// fresh sandboxed store, over HTTP on 127.0.0.1:4795, for `npm run dev:mock`
+/// with `VITE_CREATOR_BRIDGE=http://127.0.0.1:4795` (see `src/creator/api.ts`).
+/// Our built app cannot run there: its WebView2 needs the desktop session,
+/// where stock ShardBrowser holds the single instance. Prints `DB <path>`;
+/// stops after `CREATOR_BRIDGE_SECS` (1800).
+#[tokio::test]
+#[ignore]
+async fn dev_bridge() {
+    use axum::http::header;
+    use axum::routing::post;
+    let _serial = crate::migrate::serial();
+    let _root = crate::store::test_root("creator-bridge").with_config();
+    eprintln!("DB {}", store::db_path().unwrap().display());
+    // A text/plain body keeps the page's fetch a simple request (no preflight).
+    let app = axum::Router::new().route(
+        "/call",
+        post(|body: String| async move {
+            let b: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let cmd = b["cmd"].as_str().unwrap_or("");
+            let r = match crate::creator::pages::call(cmd, &b["args"]).await {
+                Some(Ok(v)) => json!({ "ok": v }),
+                Some(Err(e)) => json!({ "err": format!("{e:#}") }),
+                None => json!({ "err": format!("unknown creator command: {cmd}") }),
+            };
+            ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(r))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:4795").await.unwrap();
+    let secs = std::env::var("CREATOR_BRIDGE_SECS").map_or(1800, |v| v.parse().unwrap());
+    eprintln!("BRIDGE up");
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(secs),
+        axum::serve(listener, app),
+    )
+    .await;
+}
