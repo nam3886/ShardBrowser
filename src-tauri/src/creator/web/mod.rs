@@ -17,6 +17,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use chromiumoxide::cdp::browser_protocol::network::{EventRequestWillBeSent, ResourceType};
 use chromiumoxide::cdp::browser_protocol::page::{
     EventFrameNavigated, EventLifecycleEvent, NavigateParams,
 };
@@ -248,21 +249,42 @@ impl Page {
             .event_listener::<EventLifecycleEvent>()
             .await
             .map_err(cdp)?;
+        let mut sent = self
+            .inner
+            .event_listener::<EventRequestWillBeSent>()
+            .await
+            .map_err(cdp)?;
         // ponytail: chromiumoxide answers Page.navigate only after `load`; we return at
-        // DOMContentLoaded and its watcher finishes in the background (a goto right
-        // after a slow page waits for it, at most request_timeout).
+        // DOMContentLoaded and its watcher finishes in the background. A goto right
+        // after that is queued until the earlier page's `load` (at most request_timeout),
+        // meanwhile the page's own navigations (client redirects) still load, and the
+        // queued goto's answer can come before its page even commits (the watcher keeps
+        // the loader of when it was queued). So only the DOMContentLoaded of our own
+        // loader counts, as Playwright waits for the loader Page.navigate names: from our
+        // document request, else from the answer. A URL that sends no request
+        // (about:blank) takes the first one.
+        let target = doc_url(url);
+        let mut ours = None;
+        let mut loaded = Vec::new(); // DOMContentLoaded loaders before we knew ours
         let nav = self.inner.execute(NavigateParams::new(url));
         tokio::pin!(nav);
+        let mut answered = false;
         let mut error_page = false;
         let wait = async {
             loop {
                 tokio::select! {
-                    r = &mut nav => {
+                    r = &mut nav, if !answered => {
+                        answered = true;
                         let r = r.map_err(|e| nav_error(&e.to_string()))?;
-                        return match r.result.error_text {
-                            Some(e) => Err(nav_error(&e)),
-                            None => Ok(()),
-                        };
+                        if let Some(e) = r.result.error_text.as_deref() {
+                            return Err(nav_error(e));
+                        }
+                        match r.result.loader_id.clone() {
+                            // No loader: a same-document navigation, done.
+                            None => return Ok(()),
+                            Some(l) if target.is_none() || loaded.contains(&l) => return Ok(()),
+                            Some(l) => ours = Some(l),
+                        }
                     }
                     Some(ev) = committed.next() => {
                         if ev.frame.parent_id.is_none() {
@@ -270,11 +292,23 @@ impl Page {
                             error_page = ev.frame.unreachable_url.is_some();
                         }
                     }
+                    Some(ev) = sent.next(), if target.is_some() && ours.is_none() => {
+                        if ev.r#type == Some(ResourceType::Document)
+                            && ev.frame_id.as_ref() == main.as_ref()
+                            && doc_url(&ev.request.url) == target
+                        {
+                            ours = Some(ev.loader_id.clone());
+                        }
+                    }
                     Some(ev) = lifecycle.next() => {
                         let is_main = Some(&ev.frame_id) == main.as_ref();
-                        if is_main && ev.name == "DOMContentLoaded" && !error_page {
+                        if !is_main || ev.name != "DOMContentLoaded" || error_page {
+                            continue;
+                        }
+                        if target.is_none() || ours.as_ref() == Some(&ev.loader_id) {
                             return Ok(());
                         }
+                        loaded.push(ev.loader_id.clone());
                     }
                 }
             }
@@ -385,6 +419,13 @@ impl Page {
         };
         self.watch.act(f).await
     }
+}
+
+/// An http(s) URL as the browser requests it (no fragment); None for any other.
+fn doc_url(url: &str) -> Option<url::Url> {
+    let mut u = url::Url::parse(url).ok()?;
+    u.set_fragment(None);
+    matches!(u.scheme(), "http" | "https").then_some(u)
 }
 
 fn nav_error(text: &str) -> WebError {
@@ -594,6 +635,41 @@ mod engine_tests {
             .await
             .unwrap();
         assert_eq!(page.title().await, "clicked 15");
+    }
+
+    /// Live Breeze M2: the verify link's page sends itself on to the app while it
+    /// still loads; the next goto (queued by chromiumoxide behind that `load`) must
+    /// not end on the redirect's DOMContentLoaded, or every later goto lands one
+    /// page behind.
+    #[tokio::test]
+    async fn goto_waits_for_its_own_page_not_a_client_redirect() {
+        let Some(b) = TestBrowser::launch().await else {
+            return;
+        };
+        let doc = |body: &'static str| {
+            move || async move { ([(header::CONTENT_TYPE, "text/html")], body) }
+        };
+        let routes = axum::Router::new()
+            .route(
+                "/slow.png",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    axum::http::StatusCode::NOT_FOUND
+                }),
+            )
+            .route(
+                "/a",
+                get(doc(r#"<title>a</title><img src="/slow.png">
+                    <script>setTimeout(() => { location = "/b"; }, 300);</script>"#)),
+            )
+            .route("/b", get(doc(r#"<title>b</title><img src="/slow.png">"#)))
+            .route("/c", get(doc("<title>c</title>")));
+        let site = FixtureServer::start_with(routes).await;
+        let page = b.page().await;
+        page.goto(&format!("{}/a", site.site)).await.unwrap();
+        page.goto(&format!("{}/c", site.site)).await.unwrap();
+        assert!(page.url().await.ends_with("/c"), "{}", page.url().await);
+        assert_eq!(page.title().await, "c");
     }
 
     /// D13 regression: the page sees no CDP client (no Runtime.enable, no driver
