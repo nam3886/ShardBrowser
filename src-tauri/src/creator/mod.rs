@@ -6,6 +6,7 @@
 //! through the `creator_call` dispatcher, so adding commands never touches
 //! upstream files again.
 
+pub mod errors;
 // Used by the providers and the runner from M2 Tasks 11-12 on.
 #[allow(dead_code)]
 pub mod mail;
@@ -15,6 +16,7 @@ pub mod profile;
 pub mod providers;
 #[allow(dead_code)]
 pub mod proxy;
+pub mod runner;
 #[allow(dead_code)]
 pub mod shard;
 #[allow(dead_code)]
@@ -39,7 +41,10 @@ pub async fn creator_call(cmd: String, args: Option<Value>) -> Result<Value, Str
             let id = args["profile_id"].as_str().ok_or("profile_id required")?;
             open_example(id).await
         }
-        other => Err(anyhow::anyhow!("unknown creator command: {other}")),
+        other => match runner::call(other, &args).await {
+            Some(r) => r,
+            None => Err(anyhow::anyhow!("unknown creator command: {other}")),
+        },
     }
     .map_err(|e| format!("{e:#}"))
 }
