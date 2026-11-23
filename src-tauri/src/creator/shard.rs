@@ -32,8 +32,9 @@ pub async fn open_session(
 ) -> anyhow::Result<Opened> {
     let profile_id = super::profile::ensure_profile(db, browser_id).await?;
     if Tracker::shared().is_running(&profile_id) {
-        // Stopped already or gone: the start below says so.
-        let _ = stop(&profile_id).await;
+        // A crash may have left it running; it must stop, or we would attach
+        // to a browser still on its old proxy.
+        stop(&profile_id).await?;
     }
     super::profile::set_proxy(&profile_id, proxy)?;
     let started = async {
