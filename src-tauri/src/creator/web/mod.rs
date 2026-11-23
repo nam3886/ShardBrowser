@@ -17,10 +17,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use chromiumoxide::cdp::browser_protocol::network::{EventRequestWillBeSent, ResourceType};
-use chromiumoxide::cdp::browser_protocol::page::{
-    EventFrameNavigated, EventLifecycleEvent, NavigateParams,
-};
+use chromiumoxide::cdp::browser_protocol::page::{EventLifecycleEvent, NavigateParams};
 use chromiumoxide::cdp::browser_protocol::target::{CloseTargetParams, GetTargetsParams};
 use chromiumoxide::cdp::js_protocol::runtime::{CallFunctionOnParams, ExecutionContextId};
 use chromiumoxide::handler::HandlerConfig;
@@ -238,43 +235,22 @@ impl Page {
     }
 
     async fn goto_once(&self, url: &str) -> WebResult<()> {
-        let mut main = self.inner.mainframe().await.map_err(cdp)?;
-        let mut committed = self
-            .inner
-            .event_listener::<EventFrameNavigated>()
-            .await
-            .map_err(cdp)?;
         let mut lifecycle = self
             .inner
             .event_listener::<EventLifecycleEvent>()
             .await
             .map_err(cdp)?;
-        let mut sent = self
-            .inner
-            .event_listener::<EventRequestWillBeSent>()
-            .await
-            .map_err(cdp)?;
-        // ponytail: chromiumoxide answers Page.navigate only after `load`; we return at
-        // DOMContentLoaded and its watcher finishes in the background. A goto right
-        // after that is queued until the earlier page's `load` (at most request_timeout),
-        // meanwhile the page's own navigations (client redirects) still load, and the
-        // queued goto's answer can come before its page even commits (the watcher keeps
-        // the loader of when it was queued). So only the DOMContentLoaded of our own
-        // loader counts, as Playwright waits for the loader Page.navigate names: from our
-        // document request, else from the answer. A URL that sends no request
-        // (about:blank) takes the first one.
-        let target = doc_url(url);
-        let mut ours = None;
-        let mut loaded = Vec::new(); // DOMContentLoaded loaders before we knew ours
+        // The patched chromiumoxide sends Page.navigate at once and answers with the
+        // loader it started (PATCHES.md); as Playwright, only that loader's
+        // DOMContentLoaded counts, not a client redirect's. It can come before the answer.
         let nav = self.inner.execute(NavigateParams::new(url));
         tokio::pin!(nav);
-        let mut answered = false;
-        let mut error_page = false;
+        let mut ours = None;
+        let mut loaded = Vec::new(); // DOMContentLoaded loaders before we knew ours
         let wait = async {
             loop {
                 tokio::select! {
-                    r = &mut nav, if !answered => {
-                        answered = true;
+                    r = &mut nav, if ours.is_none() => {
                         let r = r.map_err(|e| nav_error(&e.to_string()))?;
                         if let Some(e) = r.result.error_text.as_deref() {
                             return Err(nav_error(e));
@@ -282,30 +258,15 @@ impl Page {
                         match r.result.loader_id.clone() {
                             // No loader: a same-document navigation, done.
                             None => return Ok(()),
-                            Some(l) if target.is_none() || loaded.contains(&l) => return Ok(()),
+                            Some(l) if loaded.contains(&l) => return Ok(()),
                             Some(l) => ours = Some(l),
                         }
                     }
-                    Some(ev) = committed.next() => {
-                        if ev.frame.parent_id.is_none() {
-                            main = Some(ev.frame.id.clone());
-                            error_page = ev.frame.unreachable_url.is_some();
-                        }
-                    }
-                    Some(ev) = sent.next(), if target.is_some() && ours.is_none() => {
-                        if ev.r#type == Some(ResourceType::Document)
-                            && ev.frame_id.as_ref() == main.as_ref()
-                            && doc_url(&ev.request.url) == target
-                        {
-                            ours = Some(ev.loader_id.clone());
-                        }
-                    }
                     Some(ev) = lifecycle.next() => {
-                        let is_main = Some(&ev.frame_id) == main.as_ref();
-                        if !is_main || ev.name != "DOMContentLoaded" || error_page {
+                        if ev.name != "DOMContentLoaded" {
                             continue;
                         }
-                        if target.is_none() || ours.as_ref() == Some(&ev.loader_id) {
+                        if ours.as_ref() == Some(&ev.loader_id) {
                             return Ok(());
                         }
                         loaded.push(ev.loader_id.clone());
@@ -419,13 +380,6 @@ impl Page {
         };
         self.watch.act(f).await
     }
-}
-
-/// An http(s) URL as the browser requests it (no fragment); None for any other.
-fn doc_url(url: &str) -> Option<url::Url> {
-    let mut u = url::Url::parse(url).ok()?;
-    u.set_fragment(None);
-    matches!(u.scheme(), "http" | "https").then_some(u)
 }
 
 fn nav_error(text: &str) -> WebError {
@@ -669,6 +623,51 @@ mod engine_tests {
         page.goto(&format!("{}/a", site.site)).await.unwrap();
         page.goto(&format!("{}/c", site.site)).await.unwrap();
         assert!(page.url().await.ends_with("/c"), "{}", page.url().await);
+        assert_eq!(page.title().await, "c");
+    }
+
+    /// The page sends itself to the very URL we go to next: goto must not return on
+    /// that redirect while its own Page.navigate is still to come (a late reload
+    /// in the middle of the flow). Counts /c document loads after goto returned.
+    #[tokio::test]
+    async fn goto_is_not_followed_by_a_late_reload() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let Some(b) = TestBrowser::launch().await else {
+            return;
+        };
+        let c_loads = Arc::new(AtomicUsize::new(0));
+        let counter = c_loads.clone();
+        let doc = |body: &'static str| {
+            move || async move { ([(header::CONTENT_TYPE, "text/html")], body) }
+        };
+        let routes = axum::Router::new()
+            .route(
+                "/slow.png",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    axum::http::StatusCode::NOT_FOUND
+                }),
+            )
+            .route(
+                "/a",
+                get(doc(r#"<title>a</title><img src="/slow.png">
+                    <script>setTimeout(() => { location = "/c"; }, 300);</script>"#)),
+            )
+            .route(
+                "/c",
+                get(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    doc(r#"<title>c</title><img src="/slow.png">"#)()
+                }),
+            );
+        let site = FixtureServer::start_with(routes).await;
+        let page = b.page().await;
+        page.goto(&format!("{}/a", site.site)).await.unwrap();
+        page.goto(&format!("{}/c", site.site)).await.unwrap();
+        let at_return = c_loads.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(c_loads.load(Ordering::SeqCst), at_return, "/c loaded again");
         assert_eq!(page.title().await, "c");
     }
 
