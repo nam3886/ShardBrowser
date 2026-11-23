@@ -795,6 +795,14 @@ pub fn import_basics(db: &Db, src: &Path) -> Result<ImportCounts> {
 }
 
 #[cfg(test)]
+impl Db {
+    /// A test sets a column no row function writes.
+    pub(crate) fn exec_for_test(&self, sql: &str) {
+        self.c().execute_batch(sql).unwrap();
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn temp_db() -> (Db, TempFile) {
     let path =
         std::env::temp_dir().join(format!("creator-{}.sqlite", uuid::Uuid::new_v4().simple()));

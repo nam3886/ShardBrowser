@@ -6,14 +6,17 @@
 //! through the `creator_call` dispatcher, so adding commands never touches
 //! upstream files again.
 
-// Used by the providers and the runner from M2 Task 11 on.
+// Used by the providers and the runner from M2 Tasks 11-12 on.
 #[allow(dead_code)]
 pub mod mail;
+#[allow(dead_code)]
+pub mod profile;
+#[allow(dead_code)]
+pub mod proxy;
+#[allow(dead_code)]
 pub mod shard;
-// Used by the runner from M2 Task 12 on.
 #[allow(dead_code)]
 pub mod store;
-// Used by the providers from M2 on.
 #[allow(dead_code)]
 pub mod web;
 

@@ -1,8 +1,81 @@
-//! Profiles in the launcher: open one with CDP (attach, restart or start) and stop it.
+//! Profiles in the launcher: open one with CDP (attach, restart or start) and
+//! stop it; open an account's browser for a run (`open_session`).
 
 use std::time::{Duration, Instant};
 
+use super::store::{Db, Proxy};
+use super::web::{Page, Session, World};
 use crate::process::{CdpInfo, Tracker};
+
+/// Python `GEO_FAILED`: behind a proxy, the launcher fell back to UTC.
+pub const GEO_FAILED: &str = "proxy location lookup failed";
+/// Python `account_service.INTERRUPTED`: Shard closed the browser (Close all,
+/// quit, a crash) or the person closed its window. Retryable.
+pub const INTERRUPTED: &str = "Interrupted";
+
+/// An account's browser, open for a run.
+pub struct Opened {
+    pub session: Session,
+    pub page: Page,
+    pub profile_id: String,
+}
+
+/// Open browser row `browser_id` for a run (Python `open_shard_profile`):
+/// its profile (made on first use, `profile::ensure_profile`) is stopped if a
+/// crash left it running, gets `proxy` inline (or none), starts with CDP and
+/// gets one fresh tab. Behind a proxy, a page on `UTC` fails `GEO_FAILED`.
+/// Any failure after the start stops the browser.
+pub async fn open_session(
+    db: &Db,
+    browser_id: i64,
+    proxy: Option<&Proxy>,
+) -> anyhow::Result<Opened> {
+    let profile_id = super::profile::ensure_profile(db, browser_id).await?;
+    if Tracker::shared().is_running(&profile_id) {
+        // Stopped already or gone: the start below says so.
+        let _ = stop(&profile_id).await;
+    }
+    super::profile::set_proxy(&profile_id, proxy)?;
+    let started = async {
+        let session = Session::from_profile(&profile_id).await?;
+        let page = session.page().await?;
+        if proxy.is_some() && timezone(&page).await == "UTC" {
+            anyhow::bail!(GEO_FAILED);
+        }
+        Ok((session, page))
+    };
+    match started.await {
+        Ok((session, page)) => Ok(Opened {
+            session,
+            page,
+            profile_id,
+        }),
+        Err(e) => {
+            // Never leave a profile running that no session owns.
+            let _ = stop(&profile_id).await;
+            Err(e)
+        }
+    }
+}
+
+async fn timezone(page: &Page) -> String {
+    page.eval::<String>(
+        "() => Intl.DateTimeFormat().resolvedOptions().timeZone",
+        World::Isolated,
+    )
+    .await
+    .unwrap_or_default()
+}
+
+/// A run that did not link: `INTERRUPTED` when Shard no longer runs its
+/// browser, else its own error (Python `account_service`: `not sess.is_open()`).
+pub fn failure_text(profile_id: &str, error: String) -> String {
+    if Tracker::shared().is_running(profile_id) {
+        error
+    } else {
+        INTERRUPTED.to_string()
+    }
+}
 
 /// How long a start with CDP may take to publish its endpoint (launch.rs `CDP_WAIT`).
 const CDP_WAIT: Duration = Duration::from_secs(30);
@@ -131,6 +204,13 @@ mod tests {
     #[test]
     fn plan_open_starts_when_stopped() {
         assert!(matches!(plan_open(None), OpenPlan::Start));
+    }
+
+    #[test]
+    fn closed_by_shard_is_interrupted() {
+        // Not tracked: Shard closed it (Close all, quit, a crash).
+        let gone = format!("closed-{}", uuid::Uuid::new_v4().simple());
+        assert_eq!(failure_text(&gone, "No API key shown".into()), INTERRUPTED);
     }
 
     #[test]
