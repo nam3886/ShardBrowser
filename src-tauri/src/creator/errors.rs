@@ -70,6 +70,12 @@ const RULES: &[(Rule, &str)] = &[
     (Rule::Contains("Ele API unavailable"), "MAIL_API_DOWN"),
     (Rule::Prefix(tts::NO_KEY), "API_KEY_FAILED"),
     (Rule::Prefix(tts::KEY_TEST_FAILED), "API_KEY_FAILED"),
+    // Shard's launch refusals (`launch.rs`, `runtime.rs`) and our CDP wait
+    // (`shard::open_cdp`; Python's `CDP_NOT_READY` text is in this group too).
+    (Rule::Contains("engine not installed yet"), "ENGINE_UNAVAILABLE"),
+    (Rule::Contains("engine is being updated"), "ENGINE_UNAVAILABLE"),
+    (Rule::Contains("moving or resetting its data"), "ENGINE_UNAVAILABLE"),
+    (Rule::Contains("did not open with CDP in time"), "ENGINE_UNAVAILABLE"),
     (Rule::Prefix("run: "), "APP_ERROR"),
     (Rule::Prefix("TimeoutError: "), "STEP_FAILED"),
     (Rule::Re(&STEP_RE), "STEP_FAILED"),
@@ -97,9 +103,36 @@ pub fn error_code(err: &str) -> Option<&'static str> {
     )
 }
 
+/// Python `Code.streak`: whether a failure with this code counts toward a
+/// queue's fail streak (M5). Not the site's fault, or nothing a retry fixes:
+/// no.
+pub fn counts_toward_streak(code: &str) -> bool {
+    !matches!(
+        code,
+        "INTERRUPTED"
+            | "PROXY_UNUSABLE"
+            | "NO_PROXY"
+            | "MAILBOX_GONE"
+            | "ACCOUNT_EXISTS"
+            | "PROFILE_RUNNING"
+            | "NO_BROWSER"
+            | "ENGINE_UNAVAILABLE"
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::error_code;
+    use super::{counts_toward_streak, error_code};
+
+    #[test]
+    fn engine_and_owner_causes_never_count_toward_the_streak() {
+        for code in ["ENGINE_UNAVAILABLE", "INTERRUPTED", "NO_PROXY", "ACCOUNT_EXISTS"] {
+            assert!(!counts_toward_streak(code), "{code}");
+        }
+        for code in ["CAPTCHA_UNSOLVED", "NO_MAIL", "OTHER"] {
+            assert!(counts_toward_streak(code), "{code}");
+        }
+    }
 
     #[test]
     fn breeze_texts_get_pythons_codes() {
@@ -137,6 +170,19 @@ mod tests {
             ("proxy deleted", "PROXY_UNUSABLE"),
             ("No healthy proxy for a new browser", "NO_PROXY"),
             ("profile x is already running", "PROFILE_RUNNING"),
+            (
+                "ShardBrowser browser engine not installed yet — open Settings to download",
+                "ENGINE_UNAVAILABLE",
+            ),
+            (
+                "The ShardBrowser engine is being updated. Try again in a moment.",
+                "ENGINE_UNAVAILABLE",
+            ),
+            (
+                "ShardBrowser is moving or resetting its data. Try again when that finishes.",
+                "ENGINE_UNAVAILABLE",
+            ),
+            ("profile abc did not open with CDP in time", "ENGINE_UNAVAILABLE"),
             ("Breeze Blue sign-in form did not show", "OTHER"),
         ] {
             assert_eq!(error_code(text), Some(code), "{text}");
