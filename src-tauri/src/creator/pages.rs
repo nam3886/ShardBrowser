@@ -224,7 +224,8 @@ pub(crate) async fn test_one(
     };
     match tokio::time::timeout(TEST_TIMEOUT, client.check(&mb)).await {
         Ok(Ok(())) => state(db),
-        Ok(Err(e)) if e.0.ends_with("inbox HTTP 404") => "gone",
+        // Only Ele's 404 is final; a Graph 404 is an error, as in Python.
+        Ok(Err(e)) if e.0 == "Ele API unavailable: inbox HTTP 404" => "gone",
         _ => "failed",
     }
 }

@@ -33,8 +33,8 @@ export function AddEmailsDialog({ open, onClose, onAdded }: { open: boolean; onC
     if (kind !== "outlook") return;
     void call<{ valid: number; invalid: number }>("parse_outlook", { text }).then(setParsed, () => setParsed(null));
   }, [kind, text]);
-  // A new paste or type starts over.
-  useEffect(() => setReport(null), [kind, text, count]);
+  // A new paste, type or opening starts over.
+  useEffect(() => setReport(null), [kind, text, count, open]);
   const n = kind === "outlook" ? parsed?.valid ?? 0 : count;
 
   const add = () => {

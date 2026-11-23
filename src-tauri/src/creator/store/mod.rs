@@ -833,6 +833,36 @@ impl Db {
         Ok(c.last_insert_rowid())
     }
 
+    /// A new account row on the mailbox, or its failed one for the platform
+    /// queued again in place (Python `planner._queue`: one row per mailbox,
+    /// platform and dedupe key; id, secrets and extra kept).
+    pub fn account_queue(
+        &self,
+        mailbox_id: i64,
+        platform: &str,
+        route: &str,
+        job_id: Option<i64>,
+    ) -> Result<i64> {
+        let failed: Option<i64> = self
+            .c()
+            .query_row(
+                "SELECT id FROM accounts WHERE mailbox_id=? AND platform=? AND dedupe_key='' AND status='failed'",
+                params![mailbox_id, platform],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(id) = failed else {
+            return self.account_create(mailbox_id, platform, route, job_id);
+        };
+        self.c().execute(
+            "UPDATE accounts SET status='queued', route=?, job_id=?, error=NULL, error_code=NULL, step=NULL, \
+             step_note=NULL, retry_count=0, retry_at=NULL, screenshot=NULL, started_at=NULL, finished_at=NULL, \
+             updated_at=? WHERE id=?",
+            params![route, job_id, now(), id],
+        )?;
+        Ok(id)
+    }
+
     pub fn account_get(&self, id: i64) -> Result<Option<Account>> {
         Ok(self
             .c()

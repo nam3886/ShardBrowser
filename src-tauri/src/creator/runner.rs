@@ -552,7 +552,7 @@ async fn new_account<B: Browsers>(
             let proxy_id = picked.as_ref().ok().and_then(|p| p.as_ref().map(|p| p.id));
             db.browser_create(mb_id, proxy_id, mode)?;
         }
-        let id = db.account_create(mb_id, KEY, "email", Some(job))?;
+        let id = db.account_queue(mb_id, KEY, "email", Some(job))?;
         db.account_update(
             id,
             &AccountPatch {

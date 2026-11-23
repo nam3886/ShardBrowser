@@ -18,7 +18,7 @@ import { EmailPeek } from "../widgets/EmailPeek";
 import { AppliedFilters, FilterButton, type FilterField } from "../widgets/Filters";
 import { DisplayMenu } from "../widgets/Display";
 import { ListPage } from "../widgets/ListPage";
-import { MakeDialog } from "../widgets/MakeDialog";
+import { MakeDialog, MAX as MAKE_MAX } from "../widgets/MakeDialog";
 import { PlatformMark, platformLabel, useCall, useWindowed } from "../widgets/parts";
 
 type Col = "email" | "type" | "accounts" | "mails" | "status" | "created";
@@ -127,7 +127,7 @@ export function EmailsPage() {
             // Python's "Make N" from "Free for": Make accounts with the platform and count filled in.
             <AppliedFilters fields={fields} after={freeFor && freeCount > 0 ? (
               <Button variant="neutral" mode="stroke" size="3xsmall" leftIcon={<AddIcon className="size-3.5" />} onClick={() => setMakeFor(freeFor)}>
-                {freeCount === 1 ? ct("creator.emails.makeOne", { name: platformLabel(freeFor) }) : ct("creator.emails.make", { n: Math.min(freeCount, 500), name: platformLabel(freeFor) })}
+                {freeCount === 1 ? ct("creator.emails.makeOne", { name: platformLabel(freeFor) }) : ct("creator.emails.make", { n: Math.min(freeCount, MAKE_MAX), name: platformLabel(freeFor) })}
               </Button>
             ) : undefined} />
           )}
@@ -166,7 +166,7 @@ export function EmailsPage() {
       </PageBody>
       <AddEmailsDialog open={adding} onClose={() => setAdding(false)} onAdded={list.reload} />
       {/* Free emails are Outlook ones: Make starts on that route. */}
-      <MakeDialog open={!!makeFor} platform={makeFor ?? undefined} route="email:outlook" count={Math.min(freeCount, 500)} onClose={() => setMakeFor(null)} onStarted={list.reload} />
+      <MakeDialog open={!!makeFor} platform={makeFor ?? undefined} route="email:outlook" count={Math.min(freeCount, MAKE_MAX)} onClose={() => setMakeFor(null)} onStarted={list.reload} />
     </>
   );
 }
