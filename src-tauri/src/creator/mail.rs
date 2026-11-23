@@ -318,7 +318,7 @@ impl EleClient {
                 html,
                 received_at: text(it, &["received_at", "created_at", "date"]),
             };
-            new.push(self.db.mail_create(mb.id, &row).map_err(db_err)?);
+            new.extend(self.db.mail_add(mb.id, &row).map_err(db_err)?);
         }
         Ok(new)
     }
@@ -497,11 +497,8 @@ impl OutlookClient {
                     .then(|| content.to_string()),
                 received_at: it["receivedDateTime"].as_str().map(str::to_string),
             };
-            new.push(
-                self.db
-                    .mail_create(mb.id, &row)
-                    .map_err(outlook_store_err)?,
-            );
+            // Another poll of this mailbox may have stored it a moment ago.
+            new.extend(self.db.mail_add(mb.id, &row).map_err(outlook_store_err)?);
         }
         Ok(new)
     }

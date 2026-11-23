@@ -130,18 +130,20 @@ fn mails_json(items: &[MailMessage]) -> Value {
     )
 }
 
-/// The saved Ele client; None while its address or key is not set.
-fn ele_of(db: &std::sync::Arc<Db>) -> Option<EleClient> {
-    ele_set(db)
-        .unwrap_or(false)
+/// The saved Ele client, made only for an Ele mailbox; None for an Outlook
+/// one and while Ele's address or key is not set.
+fn ele_for(db: &std::sync::Arc<Db>, id: i64) -> Option<EleClient> {
+    let ele = db.mailbox_get(id).ok().flatten()?.provider != "outlook";
+    (ele && ele_set(db).unwrap_or(false))
         .then(|| runner::ele_client(db).ok())
         .flatten()
 }
 
 async fn email_detail_cmd(args: &Value) -> Result<Value> {
     let db = runner::db()?;
-    let ele = ele_of(&db);
-    email_detail(&db, ele.as_ref(), runner::outlook()?, id(args)?).await
+    let id = id(args)?;
+    let ele = ele_for(&db, id);
+    email_detail(&db, ele.as_ref(), runner::outlook()?, id).await
 }
 
 /// `EmailDetail` (Python `get_email`): the inbox is read once first unless
@@ -190,8 +192,9 @@ pub(crate) async fn email_detail(
 
 async fn test_mailbox_cmd(args: &Value) -> Result<Value> {
     let db = runner::db()?;
-    let ele = ele_of(&db);
-    Ok(test_one(&db, ele.as_ref(), runner::outlook()?, id(args)?)
+    let id = id(args)?;
+    let ele = ele_for(&db, id);
+    Ok(test_one(&db, ele.as_ref(), runner::outlook()?, id)
         .await
         .into())
 }
@@ -238,7 +241,10 @@ fn add_outlook(db: &Db, args: &Value) -> Result<Value> {
 
 async fn add_ele_cmd(args: &Value) -> Result<Value> {
     let db = runner::db()?;
-    let ele = ele_of(&db).ok_or_else(|| anyhow!("Set the Ele API key in Settings"))?;
+    let ele = ele_set(&db)?
+        .then(|| runner::ele_client(&db).ok())
+        .flatten()
+        .ok_or_else(|| anyhow!("Set the Ele API key in Settings"))?;
     add_ele(&ele, args["count"].as_i64().unwrap_or(0)).await
 }
 

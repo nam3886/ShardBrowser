@@ -725,16 +725,26 @@ impl Db {
     }
 
     pub fn mail_create(&self, mailbox_id: i64, m: &NewMail) -> Result<MailMessage> {
+        self.mail_add(mailbox_id, m)?
+            .ok_or_else(|| anyhow::anyhow!("mail already stored"))
+    }
+
+    /// Stores a mail unless one with its message id is stored already (two
+    /// polls of one mailbox at once, `ux_mail_msg_id`): None then.
+    pub fn mail_add(&self, mailbox_id: i64, m: &NewMail) -> Result<Option<MailMessage>> {
         let c = self.c();
-        c.execute(
-            "INSERT INTO mail_messages (mailbox_id, ele_message_id, sender, subject, body, html, received_at, stored_at) VALUES (?,?,?,?,?,?,?,?)",
+        let n = c.execute(
+            "INSERT OR IGNORE INTO mail_messages (mailbox_id, ele_message_id, sender, subject, body, html, received_at, stored_at) VALUES (?,?,?,?,?,?,?,?)",
             params![mailbox_id, m.ele_message_id, m.sender, m.subject, m.body, m.html, m.received_at, now()],
         )?;
-        Ok(c.query_row(
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(c.query_row(
             &format!("SELECT {MAIL} FROM mail_messages WHERE id=?"),
             [c.last_insert_rowid()],
             mail,
-        )?)
+        )?))
     }
 
     pub fn mail_update_body(&self, id: i64, body: &str) -> Result<()> {
@@ -1634,6 +1644,24 @@ mod tests {
             .unwrap();
         assert_eq!(db.events_of(id).unwrap().len(), 1);
         assert_eq!(db.accounts_recent("breezeblue", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_mail_stored_twice_by_message_id_is_kept_once() {
+        let (db, _f) = temp_db();
+        let mb = db.mailbox_create("outlook", "a@outlook.example", "outlook.example", "T").unwrap();
+        let m = NewMail {
+            ele_message_id: Some("M1".into()),
+            ..Default::default()
+        };
+        assert!(db.mail_add(mb.id, &m).unwrap().is_some());
+        // The other poll got there first: skipped, no error.
+        assert!(db.mail_add(mb.id, &m).unwrap().is_none());
+        assert_eq!(db.mail_list(mb.id).unwrap().len(), 1);
+        // No message id: never a duplicate by id.
+        let bare = NewMail::default();
+        assert!(db.mail_add(mb.id, &bare).unwrap().is_some());
+        assert!(db.mail_add(mb.id, &bare).unwrap().is_some());
     }
 
     #[test]
