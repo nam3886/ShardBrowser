@@ -197,7 +197,9 @@ async fn dev_bridge() {
             ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(r))
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:4795").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:4795")
+        .await
+        .unwrap();
     let secs = std::env::var("CREATOR_BRIDGE_SECS").map_or(1800, |v| v.parse().unwrap());
     eprintln!("BRIDGE up");
     let _ = tokio::time::timeout(
