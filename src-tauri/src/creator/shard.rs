@@ -213,6 +213,62 @@ mod tests {
         assert_eq!(failure_text(&gone, "No API key shown".into()), INTERRUPTED);
     }
 
+    /// Live: our profile starts on the engine at `CREATOR_TEST_BROWSER`, direct
+    /// and, with `CREATOR_TEST_PROXY` (`host:port[:user:pass]`, never printed),
+    /// behind that proxy, where the page must take the proxy's timezone.
+    #[tokio::test]
+    #[ignore]
+    async fn open_session_with_proxy_reports_proxy_timezone() {
+        let _serial = crate::migrate::serial();
+        let _root = crate::creator::profile::tests::shard_root("creator-live");
+        let engine = std::env::var("CREATOR_TEST_BROWSER").expect("CREATOR_TEST_BROWSER");
+        let mut settings = crate::settings::load().unwrap();
+        settings.browser_path = Some(engine);
+        crate::settings::save(&settings).unwrap();
+        let (db, _f) = crate::creator::store::temp_db();
+        let mb = db.mailbox_create("ele", "u@a.com", "a.com", "t").unwrap();
+        let br = db.browser_create(mb.id, None, "none").unwrap();
+
+        let o = open_session(&db, br, None).await.expect("open direct");
+        assert!(!timezone(&o.page).await.is_empty());
+        assert!(crate::is_profile_running(&o.profile_id));
+        let id = o.profile_id.clone();
+        drop(o);
+        stop(&id).await.unwrap();
+        assert_eq!(failure_text(&id, "x".into()), INTERRUPTED);
+
+        let Ok(line) = std::env::var("CREATOR_TEST_PROXY") else {
+            eprintln!("CREATOR_TEST_PROXY not set: the proxy half did not run");
+            return;
+        };
+        let p: Vec<&str> = line.trim().split(':').collect();
+        let pid = db
+            .proxy_add(
+                p[0],
+                p[1].parse().unwrap(),
+                p.get(2).copied(),
+                p.get(3).copied(),
+                "static",
+            )
+            .unwrap();
+        let proxy = db.proxy_get(pid).unwrap().unwrap();
+        let o = open_session(&db, br, Some(&proxy))
+            .await
+            .map_err(|e| e.to_string());
+        match o {
+            Ok(o) => {
+                let tz = timezone(&o.page).await;
+                eprintln!("timezone behind the proxy: {tz}");
+                assert!(!tz.is_empty() && tz != "UTC");
+                let id = o.profile_id.clone();
+                drop(o);
+                stop(&id).await.unwrap();
+            }
+            // The one failure that still proves the check: Shard fell back to UTC.
+            Err(e) => assert_eq!(e, GEO_FAILED),
+        }
+    }
+
     #[test]
     fn busy_matches_the_launchers_wording() {
         assert!(busy("profile abc is already running"));
