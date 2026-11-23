@@ -81,21 +81,31 @@ impl Page {
             let (w, h): (f64, f64) = self
                 .eval_raw("() => [innerWidth, innerHeight]", World::Isolated)
                 .await?;
-            let mut rng = rand::thread_rng();
-            let (x, y) = (
-                rng.gen_range(0.0..w.max(1.0)),
-                rng.gen_range(0.0..h.max(1.0)),
-            );
+            let (x, y) = {
+                let mut rng = rand::thread_rng(); // not Send: never held across an await
+                (
+                    rng.gen_range(0.0..w.max(1.0)),
+                    rng.gen_range(0.0..h.max(1.0)),
+                )
+            };
             self.motion().create_pointer(x, y).await.map_err(cdp)?;
             *made = true;
         }
         Ok(())
     }
 
-    async fn press_at(&self, x: f64, y: f64, width: f64) -> WebResult<()> {
+    /// Glide to the point, rest `dwell` there, press. Unbounded: callers bound it.
+    pub(crate) async fn press_at(
+        &self,
+        x: f64,
+        y: f64,
+        width: f64,
+        dwell: Duration,
+    ) -> WebResult<()> {
         self.pointer().await?;
         let m = self.motion();
         m.glide_to(x, y, Some(width)).await.map_err(cdp)?;
+        tokio::time::sleep(dwell).await;
         m.tap("left", 1).await.map_err(cdp)?;
         Ok(())
     }
@@ -173,7 +183,7 @@ impl Locator {
     /// One attempt; the error says why it could not press yet.
     async fn try_click(&self) -> WebResult<()> {
         let target = self
-            .with(async |h, nodes| {
+            .with(|h, nodes| async move {
                 let Some(n) = nodes.into_iter().next() else {
                     return Err(WebError::NotFound);
                 };
@@ -210,9 +220,11 @@ impl Locator {
             .map_err(cdp)?;
         // Something may have come over it during the glide (a banner at 300 ms).
         let still = self
-            .with(async |h, nodes| match nodes.first() {
-                Some(n) => h.value::<bool>(n, HIT_JS, &[json!(x), json!(y)]).await,
-                None => Err(WebError::NotFound),
+            .with(|h, nodes| async move {
+                match nodes.first() {
+                    Some(n) => h.value::<bool>(n, HIT_JS, &[json!(x), json!(y)]).await,
+                    None => Err(WebError::NotFound),
+                }
             })
             .await?;
         if !still {
@@ -230,7 +242,7 @@ impl Locator {
             .act(async {
                 let r = self.bounding_box().await?.ok_or(WebError::NotFound)?;
                 let (x, y) = aim(&r);
-                page.press_at(x, y, r.width).await
+                page.press_at(x, y, r.width, Duration::ZERO).await
             })
             .await
     }

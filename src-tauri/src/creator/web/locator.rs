@@ -198,16 +198,17 @@ const UNIQUE_JS: &str = "function (...els) { return [...new Set(els)].sort((a, b
 static GROUP: AtomicU64 = AtomicU64::new(0);
 
 /// One call's element handles, in the isolated world.
-pub(crate) struct Handles<'a> {
-    pub(crate) page: &'a Page,
+#[derive(Clone)]
+pub(crate) struct Handles {
+    pub(crate) page: Page,
     pub(crate) group: String,
     ctx: chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId,
 }
 
-impl<'a> Handles<'a> {
-    pub(crate) async fn new(page: &'a Page) -> WebResult<Handles<'a>> {
+impl Handles {
+    pub(crate) async fn new(page: &Page) -> WebResult<Handles> {
         Ok(Handles {
-            page,
+            page: page.clone(),
             group: format!("creator-{}", GROUP.fetch_add(1, Ordering::Relaxed)),
             ctx: page.context(World::Isolated).await?,
         })
@@ -491,27 +492,43 @@ impl Locator {
     }
 
     /// Run `f` with the handles of this locator's matches (one object group).
-    pub(crate) async fn with<T>(
+    /// `f` gets its own clone of the handles: an async closure over a borrowed
+    /// one would make every page call's future not provably `Send` (rustc).
+    pub(crate) async fn with<T, F>(
         &self,
-        mut f: impl AsyncFnMut(&Handles<'_>, Vec<RemoteObjectId>) -> WebResult<T>,
-    ) -> WebResult<T> {
+        mut f: impl FnMut(Handles, Vec<RemoteObjectId>) -> F,
+    ) -> WebResult<T>
+    where
+        F: std::future::Future<Output = WebResult<T>>,
+    {
         // A navigation between resolving and using the handles makes them stale:
         // the whole call runs again on the new document.
-        let work = super::retry_stale(async || {
-            let h = Handles::new(&self.page).await?;
-            let r = match h.select(&self.steps).await {
-                Ok(nodes) => f(&h, nodes).await,
-                Err(e) => Err(e),
-            };
-            h.release().await;
-            r
-        });
+        let work = async {
+            let mut tries = 0;
+            loop {
+                let r = async {
+                    let h = Handles::new(&self.page).await?;
+                    let r = match h.select(&self.steps).await {
+                        Ok(nodes) => f(h.clone(), nodes).await,
+                        Err(e) => Err(e),
+                    };
+                    h.release().await;
+                    r
+                }
+                .await;
+                match r {
+                    Err(e) if super::stale(&e) && tries < 20 => tries += 1,
+                    r => return r,
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
         self.page.watch.act(work).await
     }
 
     /// Hidden matches count too.
     pub async fn count(&self) -> WebResult<usize> {
-        self.with(async |_, nodes| Ok(nodes.len())).await
+        self.with(|_, nodes| async move { Ok(nodes.len()) }).await
     }
 
     /// The first visible match (Python `_first_visible`: sites render desktop and
@@ -519,7 +536,7 @@ impl Locator {
     /// locator: re-resolved on every use, like any locator.
     pub async fn first_visible(&self) -> WebResult<Option<Locator>> {
         let found = self
-            .with(async |h, nodes| {
+            .with(|h, nodes| async move {
                 for (i, n) in nodes.iter().enumerate() {
                     if h.value::<bool>(n, VISIBLE_JS, &[]).await? {
                         return Ok(Some(i));
@@ -533,9 +550,11 @@ impl Locator {
 
     /// The first match's own value of `f` (`function () { … this … }`), or NotFound.
     async fn on_first<T: DeserializeOwned>(&self, f: &str) -> WebResult<T> {
-        self.with(async |h, nodes| match nodes.first() {
-            Some(n) => h.value(n, f, &[]).await,
-            None => Err(WebError::NotFound),
+        self.with(|h, nodes| async move {
+            match nodes.first() {
+                Some(n) => h.value(n, f, &[]).await,
+                None => Err(WebError::NotFound),
+            }
         })
         .await
     }
