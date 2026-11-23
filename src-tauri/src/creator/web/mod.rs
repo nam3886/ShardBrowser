@@ -639,12 +639,18 @@ mod engine_tests {
             move || async move { ([(header::CONTENT_TYPE, "text/html")], body) }
         };
         let routes = axum::Router::new()
-            .route("/a", get(doc(r#"<title>a</title><iframe src="/frame"></iframe>"#)))
+            .route(
+                "/a",
+                get(doc(r#"<title>a</title><iframe src="/frame"></iframe>"#)),
+            )
             .route(
                 "/frame",
                 get(|| async {
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    ([(header::CONTENT_TYPE, "text/html")], "<title>frame</title>")
+                    (
+                        [(header::CONTENT_TYPE, "text/html")],
+                        "<title>frame</title>",
+                    )
                 }),
             )
             .route(
