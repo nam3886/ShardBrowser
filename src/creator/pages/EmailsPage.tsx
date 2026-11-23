@@ -76,9 +76,11 @@ export function EmailsPage() {
   const nothing = list.status === "ready" && data?.counts.all === 0 && !q.trim() && !filtered;
   const n = selected.size;
   // "Test all mailboxes": every id under the current filters, not only the loaded rows.
-  const testAll = () => void call<number[]>("email_ids", { kind, status: state, free_for: freeFor, q })
-    .then((ids) => testEmails(ids), (e) => toast.fail({ title: ct("creator.emails.checkAll"), detail: e }))
-    .then(list.reload);
+  const testAll = () => {
+    void call<number[]>("email_ids", { kind, status: state, free_for: freeFor, q })
+      .then((ids) => testEmails(ids), (e) => toast.fail({ title: ct("creator.emails.checkAll"), detail: e }))
+      .then(list.reload);
+  };
   const pick = (set: (v: string | null) => void) => (v: string | null) => { set(v); setSelected(new Set()); };
   const fields: FilterField[] = [
     { id: "type", label: ct("creator.col.type"), current: kind, set: pick(setKind), values: (["outlook", "ele"] as const).map((k) => ({ value: k, label: ct(`creator.mailbox.${k}`), count: data?.counts[k], icon: <PlatformMark k={k} /> })) },
