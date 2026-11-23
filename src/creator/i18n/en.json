@@ -149,7 +149,6 @@
   "creator.emails.exportAll": "Export all",
   "creator.emailPeek.label": "Email {email}",
   "creator.emailPeek.refresh": "Refresh mail",
-  "creator.emailPeek.refreshed": "Mail refreshed",
   "creator.emailPeek.accounts": "Accounts",
   "creator.emailPeek.noAccounts": "No accounts use this email.",
   "creator.emailPeek.mail": "Mail",

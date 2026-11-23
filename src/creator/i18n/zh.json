@@ -149,7 +149,6 @@
   "creator.emails.exportAll": "全部导出",
   "creator.emailPeek.label": "邮箱 {email}",
   "creator.emailPeek.refresh": "刷新邮件",
-  "creator.emailPeek.refreshed": "邮件已刷新",
   "creator.emailPeek.accounts": "账号",
   "creator.emailPeek.noAccounts": "没有账号使用这个邮箱。",
   "creator.emailPeek.mail": "邮件",
