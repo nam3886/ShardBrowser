@@ -234,7 +234,7 @@ src/creator/
 - [ ] **Step 2: Whole-branch review** by a fresh reviewer (opus or fable) before any live run.
 - [ ] **Step 3: Live gate, ONLY after the owner's explicit approval (D-M3-4).** In the sandbox, back up our sandbox DB first. Then:
   1. Select the 25 mailboxes (D-M3-4) from the backup copy of the Python database into a combo file in the sandbox, never printed, then paste them into our sandbox store (5 for Breeze first, so Make takes them oldest first; then the 20 for the Test).
-  2. Test them (pool of 5) and report active/gone/failed. Where Python's status is known, compare it per mailbox. Rotated tokens stay only in our sandbox DB.
+  2. Test them (pool of 5) and report active/gone/failed. The harness tests every mailbox the paste added, so all 25 (a superset of the 20). Where Python's status is known, compare it per mailbox. Rotated tokens stay only in our sandbox DB.
   3. One Breeze run on Outlook through `live_breeze` with `CREATOR_LIVE_MAILBOX=outlook CREATOR_LIVE_COUNT=1` (scheduled task in the desktop session).
   4. Then 4 more, interleaved with 5 Python Breeze-on-Outlook runs the same day on other mailboxes.
   5. The report table: linked count, error codes per app, median seconds.
@@ -260,5 +260,6 @@ src/creator/
 - **Throttling at scale:** Test all on 14k+ live mailboxes from one IP may get AADSTS throttling (429 or 400 `temporarily_unavailable`). By design those count as failed, never gone, so a rerun later fixes them.
 - **Two apps, one mailbox:** until M4 retires the Python DB, a mailbox used by both apps forks its refresh token. The live gate uses disjoint mailboxes (D-M3-4). M4's file copy brings Python's tokens back, and any token rotated only in our M3 sandbox is lost then. That is harmless while old tokens stay valid, and gone if Microsoft ever revokes them.
 - **Pre-flight changes behaviour vs Python** (D-M3-2): accounts on dead mailboxes end MAILBOX_GONE in about 1 s instead of NO_MAIL after 180 s. The fail-streak rules (M5) treat MAILBOX_GONE as `streak=false`, which is correct.
+- **A permanent token error at the head of the queue:** an Outlook mailbox whose token call keeps failing with something other than `invalid_grant` (a 400 such as `invalid_request`, or a 5xx) fails pre-flight as MAIL_API_DOWN, which is retryable, so it stays free and, being oldest, is taken first by every Make. Watch for it in the live gate; if it shows, count such failures per mailbox or skip a mailbox that failed this way recently.
 - **Ele times in Peek** may show hours off until the calibration is ported (Task 4 ponytail note).
 - **Free count without a cache:** one `COUNT` with a `NOT IN` subquery per Make dialog open and per `platforms` call. Fine at 38k. Task 4's perf test tells whether 500k needs Python's revision cache.
