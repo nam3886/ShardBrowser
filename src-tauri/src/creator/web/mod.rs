@@ -672,6 +672,51 @@ mod engine_tests {
         assert_eq!(page.title().await, "c");
     }
 
+    /// The page sends itself to the very URL we go to next: goto must not return on
+    /// that redirect while its own Page.navigate is still to come (a late reload
+    /// in the middle of the flow). Counts /c document loads after goto returned.
+    #[tokio::test]
+    async fn goto_is_not_followed_by_a_late_reload() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let Some(b) = TestBrowser::launch().await else {
+            return;
+        };
+        let c_loads = Arc::new(AtomicUsize::new(0));
+        let counter = c_loads.clone();
+        let doc = |body: &'static str| {
+            move || async move { ([(header::CONTENT_TYPE, "text/html")], body) }
+        };
+        let routes = axum::Router::new()
+            .route(
+                "/slow.png",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    axum::http::StatusCode::NOT_FOUND
+                }),
+            )
+            .route(
+                "/a",
+                get(doc(r#"<title>a</title><img src="/slow.png">
+                    <script>setTimeout(() => { location = "/c"; }, 300);</script>"#)),
+            )
+            .route(
+                "/c",
+                get(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    doc(r#"<title>c</title><img src="/slow.png">"#)()
+                }),
+            );
+        let site = FixtureServer::start_with(routes).await;
+        let page = b.page().await;
+        page.goto(&format!("{}/a", site.site)).await.unwrap();
+        page.goto(&format!("{}/c", site.site)).await.unwrap();
+        let at_return = c_loads.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(c_loads.load(Ordering::SeqCst), at_return, "/c loaded again");
+        assert_eq!(page.title().await, "c");
+    }
+
     /// D13 regression: the page sees no CDP client (no Runtime.enable, no driver
     /// frames on its stacks). Fails if the vendored chromiumoxide loses its patch.
     #[tokio::test]
