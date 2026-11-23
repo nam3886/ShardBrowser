@@ -5,7 +5,7 @@ import { lazy, useEffect, useId, useState, type ComponentType, type ReactNode } 
 import { HugeiconsIcon } from "@hugeicons/react";
 import { GridViewIcon, Mail01Icon, UserMultipleIcon } from "@hugeicons/core-free-icons";
 import { CountRoll, ICON_STROKE } from "@proxyshard/shardx-ui-kit";
-import { NavAutomationIcon, RouteIcon } from "../shared/icons";
+import { RouteIcon } from "../shared/icons";
 import { FoldHeading } from "../shared/ui/FoldHeading";
 import type { Section } from "../shared/types";
 import type { Command } from "../shared/commands/types";
@@ -34,10 +34,10 @@ const PAGE_BY_ID: Record<CreatorSection, PageDef> = {
   // Our sign-up proxies: Shard's Proxies page copied onto our own store (Shard's own page is untouched).
   "c-proxies": def("creator.nav.proxies", "proxies", RouteIcon, () => import("./pages/ProxiesPage").then((m) => m.ProxiesPage)),
   "c-platforms": def("creator.nav.platforms", "platforms", icon(GridViewIcon), () => import("./pages/PlatformsPage").then((m) => m.PlatformsPage)),
-  // M0's CDP smoke page, for the upstream-merge check until M2 replaces it; not in the mock build.
-  "c-smoke": def("creator.nav.smoke", undefined, NavAutomationIcon, () => import("./CreatorPage").then((m) => m.CreatorPage)),
 };
-const PAGES = CREATOR_SECTIONS.filter((id) => !(MOCK && id === "c-smoke")).map((id) => ({ id, ...PAGE_BY_ID[id] }));
+// Only Accounts runs on real data (M2, Breeze Blue); the other pages are
+// mock-only until M7 wires them, so a real build leaves them out.
+const PAGES = CREATOR_SECTIONS.filter((id) => MOCK || id === "c-accounts").map((id) => ({ id, ...PAGE_BY_ID[id] }));
 
 /** Our pages as Shard's palette "Go to" commands (appCommands' nav.*), after its own (seam).
  *  `go` is Shard's own (keyboard to the page); "creator" and the English names find them in every language. */

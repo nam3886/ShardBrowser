@@ -3,7 +3,7 @@
 // ("Running now" with the job's usage bar, "Problems to fix" for a halted
 // queue or a missing setup); the applied filters as chips; the list; Peek
 // beside it. Sign-ups are fully automatic: nothing waits for the person.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge, Button, EmptyState, Tooltip } from "@proxyshard/shardx-ui-kit";
 import { HeaderMenu, PageBody, PageHeader } from "../../widgets/PageHeader";
 import { AddIcon, CopyIcon, DeleteIcon, DownloadIcon, FilterIcon, LockedIcon, PauseIcon, RefreshIcon, SearchIcon, StopIcon, UploadIcon } from "../../shared/icons";
@@ -12,6 +12,7 @@ import type { ListColumnDef } from "../../shared/ui/listHeader";
 import { toast } from "../../shared/model/toast";
 import { useNav } from "../../shared/model/navigation";
 import { confirmModal } from "../../shared/model/confirm";
+import { call, MOCK } from "../api";
 import { ct, useCt } from "../i18n";
 import type { AccountList, AccountRow, RunState } from "../types";
 import { AccountPeek } from "../widgets/AccountPeek";
@@ -110,6 +111,21 @@ export function AccountsPage() {
   ];
 
   const r = run.data;
+  // While a run is on, the list, its counts and the job card follow it every 2 s.
+  const live = (r?.jobs.length ?? 0) > 0;
+  const { reload: reloadRun } = run;
+  const { reload: reloadList } = list;
+  useEffect(() => {
+    if (!live) return;
+    const tick = setInterval(() => { reloadRun(); reloadList(); }, 2000);
+    return () => clearInterval(tick);
+  }, [live, reloadRun, reloadList]);
+  // Once more when it ends: its last account's result.
+  const wasLive = useRef(false);
+  useEffect(() => {
+    if (wasLive.current && !live) reloadList();
+    wasLive.current = live;
+  }, [live, reloadList]);
   const running = (r?.jobs ?? []).map((j) => card(`job-${j.job_id}`, {
     label: ct("creator.job.label"),
     pill: { color: "information", text: platformLabel(j.platform) },
@@ -117,7 +133,8 @@ export function AccountsPage() {
     why: r?.setup.engine_busy ? ct("creator.job.engineWait") : j.step ?? "",
     detail: "",
     usage: { share: (j.linked + j.failed) / j.total, used: ct("creator.job.done", { done: j.linked + j.failed, total: j.total }), ends: ct("creator.job.failed", { n: j.failed }) },
-    fix: { id: "stop", label: ct("creator.job.stop"), run: () => {} },
+    // "Stop after this account": the run checks it between accounts.
+    fix: { id: "stop", label: ct("creator.job.stop"), run: () => void call("breeze_stop").then(() => toast.ok(ct("creator.job.stopping")), () => {}) },
     more: null,
   }));
   // What a run needs that is missing (first run, a lost key): Shard's
@@ -134,7 +151,11 @@ export function AccountsPage() {
     ...(setup.proxies === 0 ? [card("setup-proxies", {
       label: ct("creator.nav.proxies"), pill: { color: "warning", text: ct("creator.setup.none") },
       what: ct("creator.setup.proxiesWhat"), why: ct("creator.setup.proxiesWhy"), detail: "",
-      fix: { id: "add", label: ct("creator.setup.addProxies"), run: () => void nav.setSection("c-proxies") }, more: null,
+      // Our Proxy pool page is mock-only until M7: a real build imports them in Settings.
+      fix: MOCK
+        ? { id: "add", label: ct("creator.setup.addProxies"), run: () => void nav.setSection("c-proxies") }
+        : { id: "settings", label: ct("creator.setup.openSettings"), run: () => void nav.openSettings("creator") },
+      more: null,
     })] : []),
   ];
   const needs = [
@@ -173,12 +194,13 @@ export function AccountsPage() {
                 ] }}
               />
             )}
-            <HeaderMenu items={[
+            {/* Mock-only until their backend comes (M5-M7). */}
+            {MOCK && <HeaderMenu items={[
               { label: ct("creator.accounts.pauseAll"), icon: <PauseIcon className="size-3.5" />, onSelect: () => {} },
               { label: ct("creator.accounts.closeBrowsers"), icon: <StopIcon className="size-3.5" />, onSelect: () => void confirmModal({
                 title: ct("creator.confirm.closeAllTitle"), message: ct("creator.confirm.closeAllBody"), confirmLabel: ct("creator.accounts.closeBrowsers"), danger: true,
               }) },
-            ]} />
+            ]} />}
             <Button variant="primary" mode="filled" size="xsmall" leftIcon={<AddIcon className="size-3.5" />} onClick={() => setMaking(true)}>
               {ct("creator.make.open")}
             </Button>
@@ -218,7 +240,7 @@ export function AccountsPage() {
           openId={openId}
           tail={96}
           // The row's one hover action, per state, as Python's row button: Retry, Log in again, Copy login.
-          rowActions={(a) => {
+          rowActions={!MOCK ? undefined : (a) => {
             const act = (label: string, icon: React.ReactNode, done: () => void) => (
               <Button variant="neutral" mode="ghost" size="3xsmall" leftIcon={icon} onClick={(e) => { e.stopPropagation(); done(); }}>{label}</Button>
             );
@@ -228,7 +250,7 @@ export function AccountsPage() {
             if (a.status === "linked") return act(ct("creator.action.copyLogin"), <CopyIcon className="size-3.5" />, () => toast.ok(ct("creator.action.copiedLogin")));
             return null;
           }}
-          bar={(
+          bar={MOCK && (
             <BulkBar
               n={n}
               onClear={() => setSelected(new Set())}
@@ -254,7 +276,7 @@ export function AccountsPage() {
           peek={<AccountPeek account={open} onClose={() => setOpenId(null)} />}
         />
       </PageBody>
-      <MakeDialog open={making} onClose={() => setMaking(false)} />
+      <MakeDialog open={making} onClose={() => setMaking(false)} onStarted={() => { reloadRun(); reloadList(); }} />
       <ChangeProxyDialog n={n} open={changing} onClose={() => setChanging(false)} />
     </>
   );

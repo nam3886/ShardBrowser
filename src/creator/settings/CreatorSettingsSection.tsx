@@ -15,7 +15,8 @@ import { NumField } from "../../shared/ui/NumField";
 import { SelectField } from "../../shared/ui/SelectField";
 import { LoadError, LoadingRows } from "../../shared/ui/ListStates";
 import { toast } from "../../shared/model/toast";
-import { call } from "../api";
+import { open } from "@tauri-apps/plugin-dialog";
+import { call, MOCK } from "../api";
 import { t } from "../../shared/i18n";
 import { useCt } from "../i18n";
 import type { SaveState } from "../../pages/settings/useSettingsDraft";
@@ -157,7 +158,9 @@ export function CreatorSettingsSection() {
           control={() => <TestButton<{ domains: number }> cmd="test_ele" ok={(r) => ct("creator.settings.eleOk", { n: r.domains })} failed={ct("creator.settings.eleFailed")} />}
         />
       </SettingsGroup>
-      <SettingsGroup title={ct("creator.settings.relayTitle")} help={ct("creator.settings.relayHelp")}>
+      {/* Relay, captcha, runs and blocked domains are mock-only until M5-M7;
+          the real backend answers the Breeze Blue settings (Ele, proxy rest). */}
+      {MOCK && <SettingsGroup title={ct("creator.settings.relayTitle")} help={ct("creator.settings.relayHelp")}>
         <SettingRow
           id="relay-url"
           title={ct("creator.settings.relayUrl")}
@@ -172,11 +175,11 @@ export function CreatorSettingsSection() {
           help={ct("creator.settings.relayTestHelp")}
           control={() => <TestButton<unknown> cmd="test_relay" ok={() => ct("creator.settings.relayOk")} failed={ct("creator.settings.relayFailed")} />}
         />
-      </SettingsGroup>
-      <SettingsGroup title={ct("creator.settings.captchaTitle")}>
+      </SettingsGroup>}
+      {MOCK && <SettingsGroup title={ct("creator.settings.captchaTitle")}>
         {keyRow("yescaptcha_key", s.yescaptcha_key_saved, ct("creator.settings.yescaptcha"), ct("creator.settings.yescaptchaHelp"))}
-      </SettingsGroup>
-      <SettingsGroup title={ct("creator.settings.engineTitle")}>
+      </SettingsGroup>}
+      {MOCK && <SettingsGroup title={ct("creator.settings.engineTitle")}>
         <SettingRow
           id="max-browsers"
           title={ct("creator.settings.maxBrowsers")}
@@ -204,7 +207,7 @@ export function CreatorSettingsSection() {
           help={ct("creator.settings.deleteFailedHelp")}
           control={({ labelId, helpId }) => <Switch aria-labelledby={labelId} aria-describedby={helpId} checked={s.delete_failed_browser} onChange={(v) => set({ delete_failed_browser: v })} />}
         />
-      </SettingsGroup>
+      </SettingsGroup>}
       <SettingsGroup title={ct("creator.settings.proxyTitle")}>
         <SettingRow
           id="proxy-rest"
@@ -213,11 +216,46 @@ export function CreatorSettingsSection() {
           control={({ labelId, helpId }) => <div className="w-[120px]"><NumField aria-labelledby={labelId} aria-describedby={helpId} value={s.proxy_rest_days} min={0} max={60} onChange={(v) => set({ proxy_rest_days: v })} /></div>}
         />
       </SettingsGroup>
-      <SettingsGroup title={ct("creator.settings.blockedTitle")} help={ct("creator.settings.blockedHelp")}>
+      {MOCK && <SettingsGroup title={ct("creator.settings.blockedTitle")} help={ct("creator.settings.blockedHelp")}>
         <BlockedDomains list={s.blocked_domains} onChange={(blocked_domains) => set({ blocked_domains })} />
-      </SettingsGroup>
+      </SettingsGroup>}
+      {/* The Python app's proxies, blocked domains and Ele settings (M2: a
+          fresh store seeded from a backup copy). The picker is Tauri's. */}
+      {!MOCK && (
+        <SettingsGroup title={ct("creator.settings.importTitle")}>
+          <SettingRow
+            id="import"
+            title={ct("creator.settings.importRow")}
+            help={ct("creator.settings.importHelp")}
+            control={() => <ImportButton />}
+          />
+        </SettingsGroup>
+      )}
     </div>
   );
+}
+
+/** Import from a ghidorah.sqlite copy, then the saved settings read again
+ *  (kept as typed where the draft has changes). */
+function ImportButton() {
+  const ct = useCt();
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    const path = await open({ filters: [{ name: ct("creator.settings.importFilter"), extensions: ["sqlite", "db"] }] });
+    if (typeof path !== "string") return;
+    setBusy(true);
+    try {
+      const n = await call<{ proxies: number; blocked_domains: number; settings: number }>("import_basics", { path });
+      toast.ok(ct("creator.settings.imported", { proxies: n.proxies, domains: n.blocked_domains, settings: n.settings }));
+      const v = await call<CreatorSettings>("settings");
+      useDraft.setState((d) => ({ saved: v, s: same(d.s, d.saved) ? v : d.s }));
+    } catch (e) {
+      toast.fail({ title: ct("creator.settings.importFailed"), detail: e });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <Button variant="neutral" mode="stroke" size="xsmall" isLoading={busy} onClick={() => void run()}>{ct("creator.settings.import")}</Button>;
 }
 
 /** Test Ele / Test relay: busy while it asks, then Shard's toast with the answer. */

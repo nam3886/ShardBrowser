@@ -8,7 +8,7 @@ import { FieldGroup } from "../../shared/ui/FieldGroup";
 import { NumField } from "../../shared/ui/NumField";
 import { SelectField } from "../../shared/ui/SelectField";
 import { toast } from "../../shared/model/toast";
-import { call } from "../api";
+import { call, MOCK } from "../api";
 import { useCt } from "../i18n";
 import type { MakeBlock, PlatformCard } from "../types";
 import { PlatformMark, platformLabel } from "./parts";
@@ -20,29 +20,40 @@ const loadChoice = (): Choice => {
   catch { return { k: "breezeblue", proxy: "rotate", kind: "" }; }
 };
 
-export function MakeDialog({ open, platform, count: given, onClose }: { open: boolean; platform?: string; count?: number; onClose: () => void }) {
+/** Most accounts one Make run takes (the backend's `breeze_run` limit). */
+const MAX = 20;
+
+export function MakeDialog({ open, platform, count: given, onClose, onStarted }: { open: boolean; platform?: string; count?: number; onClose: () => void; onStarted?: () => void }) {
   const ct = useCt();
   const [choice, setChoice] = useState(loadChoice);
-  const k = platform ?? choice.k;
+  // The real backend makes Breeze Blue only (M2); the mock, every service.
+  const k = platform ?? (MOCK ? choice.k : "breezeblue");
   const [count, setCount] = useState(given ?? 5);
   useEffect(() => { if (open && given) setCount(given); }, [open, given]);
   const [route, setRoute] = useState("");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
-  const [options, setOptions] = useState<Record<string, number>>({});
+  // Free emails per route; null: a new mailbox is made for each account (Ele).
+  const [options, setOptions] = useState<Record<string, number | null>>({});
   useEffect(() => { if (open) void call<PlatformCard[]>("platforms").then(setPlatforms, () => {}); }, [open]);
-  useEffect(() => { if (open) void call<Record<string, number>>("make_options", { platform: k }).then(setOptions, () => setOptions({})); }, [open, k]);
+  useEffect(() => { if (open) void call<Record<string, number | null>>("make_options", { platform: k }).then(setOptions, () => setOptions({})); }, [open, k]);
+  // A route this service does not offer: its first one.
+  const routes = Object.keys(options);
+  useEffect(() => {
+    const rs = Object.keys(options);
+    if (rs.length && !rs.includes(route)) setRoute(rs[0]);
+  }, [options, route]);
   // What stops a run before it starts (a missing key, the engine, proxies):
   // the dialog's own note, as New profile says why it cannot create.
   const [blocks, setBlocks] = useState<MakeBlock[]>([]);
-  useEffect(() => { if (open) void call<MakeBlock[]>("make_check", { platform: k, route }).then(setBlocks, () => setBlocks([])); }, [open, k, route]);
+  useEffect(() => { if (open) void call<MakeBlock[]>("make_check", { platform: k, route, proxy: choice.proxy }).then(setBlocks, () => setBlocks([])); }, [open, k, route, choice.proxy]);
   const set = (next: Partial<Choice>) => {
     const c = { ...choice, ...next };
     setChoice(c);
     try { localStorage.setItem(KEY, JSON.stringify(c)); } catch { /* storage blocked: kept for this session */ }
   };
   const routeLabel = (r: string) => (r === "" ? ct("creator.make.routeAuto") : r.startsWith("email:") ? ct(`creator.make.route.${r.slice(6)}`) : ct("creator.make.routeVia", { name: platformLabel(r) }));
-  const free = options[route] ?? 0;
-  const short = count > free;
+  const free = route in options ? options[route] : 0;
+  const short = free !== null && count > free;
   const block = blocks[0];
 
   return (
@@ -53,7 +64,11 @@ export function MakeDialog({ open, platform, count: given, onClose }: { open: bo
       confirmLabel={ct("creator.make.confirm", { n: count })}
       isDisabled={short || !!block}
       footerNote={block ? ct(`creator.make.block.${block}`) : short ? (free === 1 ? ct("creator.make.shortOne") : ct("creator.make.short", { n: free })) : undefined}
-      onConfirm={() => { toast.ok(ct("creator.make.queued", { n: count, name: platformLabel(k) })); onClose(); }}
+      onConfirm={() => void call("breeze_run", { count, proxy_mode: choice.proxy }).then(() => {
+        toast.ok(ct("creator.make.queued", { n: count, name: platformLabel(k) }));
+        onStarted?.();
+        onClose();
+      }, (e) => toast.fail({ title: ct("creator.make.failed"), detail: e }))}
     >
       <div className="flex flex-col gap-4 py-4">
         <div className="grid grid-cols-[minmax(0,1fr)_120px] gap-3">
@@ -64,16 +79,18 @@ export function MakeDialog({ open, platform, count: given, onClose }: { open: bo
             options={platforms.filter((p) => p.ready).map((p) => ({ value: p.key, label: p.label, icon: <PlatformMark k={p.key} /> }))}
             disabled={!!platform}
           />
-          <NumField label={ct("creator.make.count")} value={count} min={1} max={100} onChange={setCount} />
+          <NumField label={ct("creator.make.count")} value={count} min={1} max={MAX} onChange={setCount} />
         </div>
         <FieldGroup label={ct("creator.make.through")}>
           {(labelId) => (
             // Each choice with its help line under it, as Sync's Disconnect dialog draws its two.
             <div role="radiogroup" aria-labelledby={labelId} className="grid grid-cols-2 gap-3">
-              {Object.keys(options).map((r) => (
+              {routes.map((r) => (
                 <div key={r} className="flex flex-col gap-1">
                   <Radio name="creator-route" checked={route === r} onChange={() => setRoute(r)} label={routeLabel(r)} aria-describedby={`creator-route-${r}`} />
-                  <p id={`creator-route-${r}`} className="m-0 ps-[24px] text-help text-text-sub-600">{ct("creator.make.free", { n: options[r] })}</p>
+                  <p id={`creator-route-${r}`} className="m-0 ps-[24px] text-help text-text-sub-600">
+                    {options[r] === null ? ct("creator.make.newMailbox") : ct("creator.make.free", { n: options[r] ?? 0 })}
+                  </p>
                 </div>
               ))}
             </div>
@@ -94,7 +111,8 @@ export function MakeDialog({ open, platform, count: given, onClose }: { open: bo
             />
           )}
         </FieldGroup>
-        {choice.proxy !== "none" && (
+        {/* IP type comes with our Proxy pool page (M7). */}
+        {MOCK && choice.proxy !== "none" && (
           <SelectField
             label={ct("creator.make.kind")}
             value={choice.kind}
