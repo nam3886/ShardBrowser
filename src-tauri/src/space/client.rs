@@ -1535,6 +1535,7 @@ mod tests {
             }
             let text = std::fs::read_to_string(path).unwrap();
             let allowed = OTHER_TRAFFIC.iter().any(|(f, _)| *f == rel);
+            let allowed = allowed || rel.starts_with("creator/"); // creator fork seam: our HTTP answers to docs/creator rules; the team-token check still applies
             for (n, line) in code(&text) {
                 if TALKS.iter().any(|t| line.contains(t)) {
                     unused.retain(|f| *f != rel);

@@ -31,7 +31,7 @@ const MANIFEST_URL: &str =
 /// Kept short on purpose: giving up early only costs this launch its update
 /// check, while waiting costs the operator a launcher that looks stuck.
 const MANIFEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
-const LAUNCHER_RELEASE_REPO: &str = "ProxyShard/ShardBrowser";
+const LAUNCHER_RELEASE_REPO: &str = "nam3886/ShardBrowser"; // creator fork seam: our releases, not upstream's
 /// Chromium version baked into the current bundle (used for Mac Framework path).
 pub const CHROMIUM_VERSION: &str = "158.0.8127.36";
 

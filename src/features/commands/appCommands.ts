@@ -29,6 +29,7 @@ import { useJoinTeam } from "../join-team/model/store";
 import { useTeamAsk } from "../team-admin/model/store";
 import { useTeamTrash } from "../team-trash/model/store";
 import { syncConnected, useSync } from "../../entities/sync";
+import { CREATOR_DATA, creatorNavCommands, creatorTabLabel } from "../../creator"; // creator fork seam
 import { syncNow } from "../sync-setup/model/actions";
 
 // A theme picked here is stored at once and shows at once; a theme still
@@ -67,6 +68,7 @@ export const SETTINGS_TABS: Record<SettingsTab, () => string> = {
   sync: () => t("settings.tabSync"),
   other: () => t("settings.tabOther"),
   about: () => t("settings.tabAbout"),
+  creator: creatorTabLabel, // creator fork seam
 };
 export const SETTINGS_TAB_IDS = Object.keys(SETTINGS_TABS) as SettingsTab[];
 
@@ -209,6 +211,7 @@ export const APP_COMMANDS: readonly Command[] = [
   { ...APP, id: "nav.automation", group: "navigate", icon: NavAutomationIcon, label: () => t("sidebar.navProjects"), keywords: () => ["projects"], surfaces: ["palette"], run: go("automation") },
   { ...APP, id: "nav.proxyshard", group: "navigate", icon: NavShopIcon, label: () => t("sidebar.navAccountShop"), keywords: () => ["account", "shop", "proxyshard"], surfaces: ["palette"], run: go("proxyshard") },
   // In a team: for its admin, and for a member once they see rows of its Trash.
+  ...creatorNavCommands(go), // creator fork seam: our pages in Go to
   { ...APP, id: "nav.trash", group: "navigate", icon: NavTrashIcon, label: () => t("sidebar.navTrash"), surfaces: ["palette"], when: () => { const team = activeTeam(useSpace.getState().state); return !team || team.admin || useTeamTrash.getState().seen; }, run: go("trash") },
   // The Team page has no row of its own: the space menu and these reach it.
   {
@@ -252,6 +255,7 @@ export const APP_COMMANDS: readonly Command[] = [
     surfaces: ["palette"],
     // No Sync tab on a backend without sync commands.
     ...(tab === "sync" ? { when: () => !useSync.getState().missing } : {}),
+    ...(tab === "creator" ? { when: () => CREATOR_DATA } : {}), // creator fork seam: no Creator tab until our backend answers
     run: () => { void useNav.getState().openSettings(tab, { focus: true }); },
   })),
   // The palette's own keys, for the sheet and the palette's footer.

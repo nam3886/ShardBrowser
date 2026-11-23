@@ -1,3 +1,5 @@
+import { CREATOR_SECTIONS } from "../../creator/sections"; // creator fork seam
+
 export const SECTIONS = [
   "profiles",
   "proxies",
@@ -9,6 +11,7 @@ export const SECTIONS = [
   "trash",
   "settings",
   "team",
+  ...CREATOR_SECTIONS, // creator fork seam
 ] as const;
 export type Section = (typeof SECTIONS)[number];
 

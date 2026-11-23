@@ -125,6 +125,7 @@ const TAKE_OUT: Need = Rights(&[(Always, TakeOut, Team)]);
 
 /// Tauri commands by their name in `generate_handler!`, routes as "METHOD /path".
 const RULES: &[(&str, Need)] = &[
+    ("creator::creator_call", Off), // creator fork seam: our commands act on local profiles only
     // Profiles.
     ("profile_list", SEE_P),
     ("profile_get", SEE_P),

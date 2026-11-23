@@ -1,0 +1,9 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Widget</title></head>
+<body style="margin:0"><label><input type="checkbox"> Verify you are human</label>
+<script>
+  addEventListener("message", (e) => {
+    if (e.data === "ask") parent.postMessage({ token: "fixture-token" }, "*");
+  });
+</script>
+</body></html>

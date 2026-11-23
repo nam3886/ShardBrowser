@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Bounce</title></head>
+<body>
+  <button id="plain">Plain</button>
+<script>
+  // A client-side redirect chain: the document is replaced every 60 ms, 15 times,
+  // so handles a call took a moment ago belong to a page that is gone.
+  const n = Number(new URLSearchParams(location.search).get("n") || 0);
+  document.getElementById("plain").addEventListener("click", () => { document.title = "clicked " + n; });
+  if (n < 15) setTimeout(() => location.replace("bounce.html?n=" + (n + 1)), 60);
+</script>
+</body></html>

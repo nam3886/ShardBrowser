@@ -29,6 +29,7 @@ import { titleBarOnMouseDown } from "../../shared/lib/dragWindow";
 import { useNarrowWindow } from "../../shared/hooks/useNarrowWindow";
 import type { RtUpdate, Section } from "../../shared/types";
 import { useNav } from "../../shared/model/navigation";
+import { CreatorNavGroup } from "../../creator"; // creator fork seam
 import { useKeyPrefs } from "../../shared/model/keyPrefs";
 import { useWhatsNew } from "../../shared/model/whatsNew";
 import { useLang, useT } from "../../shared/i18n";
@@ -1060,6 +1061,7 @@ export function Sidebar() {
         </div>
         {/* The lists that grow with the user's data scroll on their own. */}
         <ScrollArea>
+          <CreatorNavGroup compact={compact} Item={PageItem} />{/* creator fork seam */}
           <PinnedGroup compact={compact} />
           {/* One box round Folders and Views, which the tour points at
               together; it keeps the list's own gap between the two. */}

@@ -3,7 +3,7 @@ import { SECTIONS, type Section } from "../types";
 import { confirmLeave, hasUnsaved } from "./unsaved";
 
 /** The parts of the Settings page. */
-export type SettingsTab = "general" | "appearance" | "profiles" | "templates" | "tags" | "views" | "api" | "helper" | "storage" | "sync" | "other" | "about";
+export type SettingsTab = "general" | "appearance" | "profiles" | "templates" | "tags" | "views" | "api" | "helper" | "storage" | "sync" | "other" | "about" | "creator"; // creator fork seam
 
 /** `focus`: the page was asked for from the keyboard; it gets the keyboard once it renders. */
 export type NavOptions = { focus?: boolean };
@@ -36,6 +36,7 @@ function sectionFromUrl(): Section {
 // same tab. The record makes tsc check this list against the type.
 const SETTINGS_TABS: Record<SettingsTab, true> = {
   general: true, appearance: true, profiles: true, templates: true, tags: true, views: true, api: true, helper: true, storage: true, sync: true, other: true, about: true,
+  creator: true, // creator fork seam
 };
 
 function tabFromUrl(): SettingsTab {

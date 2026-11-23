@@ -1,4 +1,5 @@
 // ShardBrowser Launcher — Tauri backend.
+mod creator; // creator fork seam
 
 mod profile_icon;
 mod platform_version;
@@ -2778,6 +2779,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            creator::creator_call, // creator fork seam
             sync_launch,
             sync_status,
             sync_set_paused,

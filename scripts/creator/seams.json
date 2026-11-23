@@ -1,0 +1,36 @@
+{
+  "ours": [
+    "src-tauri/src/creator/**",
+    "src-tauri/creator-vendor/**",
+    "src/creator/**",
+    "scripts/creator/**",
+    "docs/creator/**",
+    "docs/plans/**",
+    "creator-spikes/**",
+    "e2e/creator-*",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/settings.json",
+    "SPIKE-REPORT.md"
+  ],
+  "seams": {
+    ".gitignore": 1,
+    "src-tauri/Cargo.toml": 1,
+    "src-tauri/Cargo.lock": 0,
+    "src-tauri/tauri.conf.json": 0,
+    "src-tauri/src/lib.rs": 2,
+    "src-tauri/src/runtime.rs": 1,
+    "src-tauri/src/space/doors.rs": 1,
+    "src-tauri/src/space/client.rs": 1,
+    "src/shared/types/index.ts": 2,
+    "src/app/App.tsx": 2,
+    "src/shared/model/navigation.ts": 2,
+    "src/features/commands/appCommands.ts": 4,
+    "src/widgets/Sidebar/Sidebar.tsx": 2,
+    "src/pages/settings/index.tsx": 7
+  },
+  "chromiumoxide": {
+    "ours": "src-tauri/Cargo.toml",
+    "theirs": "sdks/rust/Cargo.toml"
+  }
+}

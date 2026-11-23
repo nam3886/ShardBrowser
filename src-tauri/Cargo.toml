@@ -140,3 +140,23 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging", # Stop's WM_CLOSE to a browser's windows, shown or not
 ] }
 
+
+# creator fork seam: our own dependencies and patches, kept at the end of the file.
+[dependencies.chromiumoxide]
+version = "0.7"
+default-features = false
+features = ["tokio-runtime"]
+
+[dependencies.shardx]
+path = "../sdks/rust"
+
+[dependencies.regex]
+version = "1"
+
+[dependencies.rand]
+version = "0.8"
+
+# chromiumoxide with our stealth patches (creator-vendor/chromiumoxide/PATCHES.md).
+# Applies to every crate in this build, upstream's sdks/rust (shardx) included.
+[patch.crates-io.chromiumoxide]
+path = "creator-vendor/chromiumoxide"

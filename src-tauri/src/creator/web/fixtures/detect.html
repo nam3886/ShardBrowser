@@ -1,0 +1,69 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>pending</title></head>
+<body><p>CDP detection probe</p>
+<script>
+  // The known checks a page runs to spot a CDP-driven browser. The result is
+  // JSON in document.title (read back by the stealth probe test).
+  const out = {};
+
+  // Runtime.enable leak: with the Runtime domain on, the console message is
+  // serialised for the client, which reads the error's `stack`.
+  let stackRead = 0;
+  const err = new Error("probe");
+  Object.defineProperty(err, "stack", { get() { stackRead++; return ""; } });
+  console.debug(err);
+  // Same idea through a plain object's getter (some engines only preview objects).
+  let previewRead = 0;
+  const obj = {};
+  Object.defineProperty(obj, "x", { enumerable: true, get() { previewRead++; return 1; } });
+  console.log(obj);
+
+  // V8 formats a logged error's stack for an attached inspector: a user
+  // prepareStackTrace sees that call.
+  let prepared = 0;
+  const keep = Error.prepareStackTrace;
+  Error.prepareStackTrace = (e, frames) => { prepared++; return keep ? keep(e, frames) : String(e); };
+  const fresh = new Error("probe2");
+  prepared = 0;
+  console.debug(fresh);
+  const preparedOnLog = prepared;
+  Error.prepareStackTrace = keep;
+
+  // Serialising console messages for a client costs time: log a wide object many times.
+  const wide = {};
+  for (let i = 0; i < 2000; i++) wide["k" + i] = { v: i, s: "x".repeat(20) };
+  const t0 = performance.now();
+  for (let i = 0; i < 200; i++) console.debug(wide);
+  const consoleMs = performance.now() - t0;
+
+  out.webdriver = navigator.webdriver;
+  out.automationGlobals = Object.getOwnPropertyNames(window).filter((k) =>
+    /^cdc_|^\$cdc_|^__playwright|^__pw|^__puppeteer|^__chromiumoxide|^__nightmare|^_selenium|^__webdriver|^domAutomation/i.test(k));
+
+  const natives = {
+    "Function.prototype.toString": Function.prototype.toString,
+    "navigator.webdriver getter": Object.getOwnPropertyDescriptor(Navigator.prototype, "webdriver")?.get,
+    "HTMLCanvasElement.toDataURL": HTMLCanvasElement.prototype.toDataURL,
+    "WebGLRenderingContext.getParameter": WebGLRenderingContext.prototype.getParameter,
+    "navigator.plugins getter": Object.getOwnPropertyDescriptor(Navigator.prototype, "plugins")?.get,
+    "Date.prototype.getTimezoneOffset": Date.prototype.getTimezoneOffset,
+    "console.debug": console.debug,
+  };
+  out.patchedNatives = Object.entries(natives)
+    .filter(([, f]) => typeof f === "function" && !/\{\s*\[native code\]\s*\}\s*$/.test(Function.prototype.toString.call(f)))
+    .map(([k]) => k);
+
+  // An Error's stack names the scripts on it: a driver's evaluation script shows up there.
+  out.stackSources = (new Error().stack || "").split("\n").filter((l) => /pptr|puppeteer|playwright|chromiumoxide|__/i.test(l));
+
+  setTimeout(() => {
+    out.runtimeEnableLeak = stackRead > 0;
+    out.stackReads = stackRead;
+    out.consolePreviewReads = previewRead;
+    out.prepareStackTraceOnLog = preparedOnLog;
+    out.consoleMs = Math.round(consoleMs);
+    out.userAgent = navigator.userAgent;
+    document.title = JSON.stringify(out);
+  }, 500);
+</script>
+</body></html>

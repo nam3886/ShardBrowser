@@ -50,9 +50,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI5ODAyRDk4RDZDQjkxMDcKUldRSGtjdldtQzJBdVQzaHdJWmdrVzRyUE0yUHNJMExreUZ5cjNpMENwMG9NS3pDcXU0THpwdFcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwMUNCRUZCOUU4REM1MjEKUldRaHhZMmUrNzRjc01kYmdBcmRVSTZPK3ArTWlOQ2p4WlJvOXA3UGl3N1VwY1dodnl1SVVOM00K",
       "endpoints": [
-        "https://github.com/ProxyShard/ShardBrowser/releases/latest/download/latest.json"
+        "https://github.com/nam3886/ShardBrowser/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

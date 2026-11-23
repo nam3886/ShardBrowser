@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Frames</title></head>
+<body>
+  <p>A Turnstile-like widget: a cross-site iframe in a closed shadow root,
+     with the response field next to the shadow host.</p>
+  <div class="cf-turnstile">
+    <div id="host"></div>
+    <input type="hidden" name="cf-turnstile-response" value="">
+  </div>
+  <!-- Same site: stays in this page's process and frame tree. -->
+  <iframe src="/basic.html" width="200" height="50"></iframe>
+<script>
+  const other = new URLSearchParams(location.search).get("other");
+  const root = document.getElementById("host").attachShadow({ mode: "closed" });
+  const frame = document.createElement("iframe");
+  frame.src = other + "/widget.html";
+  frame.width = 300;
+  frame.height = 65;
+  root.appendChild(frame);
+  window.askToken = () => frame.contentWindow.postMessage("ask", "*");
+  addEventListener("message", (e) => {
+    if (e.data && e.data.token) document.querySelector("input[name=cf-turnstile-response]").value = e.data.token;
+  });
+</script>
+</body></html>

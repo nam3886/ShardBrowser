@@ -51,6 +51,7 @@ import { TeamStatusBanner } from "../widgets/TeamStatusBanner";
 import { LoadingCards, LoadingRows } from "../shared/ui/ListStates";
 import { whenIdle } from "../shared/lib/idle";
 import "./wireStores";
+import { CreatorPages } from "../creator"; // creator fork seam
 
 // The startup chunk is the shell and the Profiles page; every other page,
 // and What's new with its release notes (80 KB of JSON), is a chunk of its
@@ -347,6 +348,7 @@ function Shell() {
         {section === "trash" && <LazyPage section="trash"><TrashPage /></LazyPage>}
         {section === "settings" && <LazyPage section="settings"><SettingsPage /></LazyPage>}
         {section === "team" && <LazyPage section="team"><TeamPage /></LazyPage>}
+        <CreatorPages section={section} Lazy={LazyPage} />{/* creator fork seam */}
       </main>
       <ToastHost />
       <ConfirmHost />

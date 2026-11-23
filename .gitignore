@@ -1,3 +1,7 @@
+# creator fork seam
+.worktrees/
+.spike-home/
+*.sqlite*
 node_modules
 
 # build output — regenerated, keeps diffs readable

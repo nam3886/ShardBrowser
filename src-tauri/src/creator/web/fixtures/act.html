@@ -1,0 +1,60 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Act</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; }
+  button { margin: 12px; padding: 10px 18px; }
+  #cover { position: fixed; inset: 0; background: rgba(0,0,0,.2); display: none; }
+  #banner { position: fixed; left: 0; right: 0; top: 0; height: 100%; background: #eee; display: none; }
+  #moving { position: relative; left: 0; }
+</style></head>
+<body>
+  <button id="plain">Plain</button>
+  <button id="late" disabled>Late</button>
+  <button id="moving">Moving</button>
+  <button id="never" disabled>Never</button>
+  <form id="f"><input name="email" value="old"></form>
+  <input name="react">
+  <div id="cover"></div>
+  <div id="banner"><button id="accept">Accept all cookies</button></div>
+<script>
+  // Every click with whether it was trusted and how many pointer moves came before it.
+  window.clicks = [];
+  let moves = 0;
+  addEventListener("pointermove", () => moves++, true);
+  addEventListener("click", (e) => {
+    const id = e.target.closest("[id]")?.id || "";
+    if (id === "banner" || id === "cover") return;
+    window.clicks.push({ id, trusted: e.isTrusted, moves });
+    moves = 0;
+  }, true);
+
+  setTimeout(() => { document.getElementById("late").disabled = false; }, 400);
+  // Moves for 300 ms, then stays.
+  const mv = document.getElementById("moving");
+  const t0 = performance.now();
+  (function step() {
+    const t = performance.now() - t0;
+    mv.style.left = (t < 300 ? Math.round(t / 3) : 100) + "px";
+    if (t < 300) requestAnimationFrame(step);
+  })();
+
+  window.cover = () => { document.getElementById("cover").style.display = "block"; };
+  window.banner = (ms) => { setTimeout(() => { document.getElementById("banner").style.display = "block"; }, ms); };
+  document.getElementById("accept").addEventListener("click", () => {
+    document.getElementById("banner").style.display = "none";
+  });
+
+  window.submitted = "";
+  document.getElementById("f").addEventListener("submit", (e) => {
+    e.preventDefault();
+    window.submitted = e.target.email.value;
+  });
+
+  // React-like: the first value typed is dropped once (the flows re-fill).
+  const react = document.querySelector("input[name=react]");
+  let dropped = false;
+  react.addEventListener("input", () => {
+    if (!dropped && react.value.length > 2) { dropped = true; setTimeout(() => { react.value = ""; }, 0); }
+  });
+</script>
+</body></html>

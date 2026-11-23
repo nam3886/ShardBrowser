@@ -1,0 +1,42 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Roles</title>
+<style>
+  /* Collapsed, not display:none: the role engine (like Playwright's) leaves out
+     ARIA-hidden elements, but a zero-size copy is still a match. */
+  .mobile { width: 0; height: 0; padding: 0; border: 0; overflow: hidden; }
+  .gone { display: none; }
+  .styled { padding: 4px; border: 1px solid; }
+</style></head>
+<body>
+  <!-- A hidden copy before the visible one (desktop + mobile renders). -->
+  <button id="create-hidden" class="mobile">Create API key</button>
+  <button id="create-shown">Create API key</button>
+  <button id="create-gone" class="gone">Create API key</button>
+
+  <div role="dialog" aria-label="New key">
+    <input name="name" value="prefilled">
+    <button id="dialog-create">Create key</button>
+  </div>
+  <button id="outside-create">Create key</button>
+
+  <button disabled>Skip question</button>
+  <button>Start creating</button>
+  <div id="aria-off" role="button" aria-disabled="true">Later</div>
+
+  <button aria-label="Close"><svg width="10" height="10"></svg></button>
+  <a href="#" role="button" class="styled">Try again</a>
+  <button>Accept all cookies</button>
+
+  <button id="continue">Continue</button>
+  <button>Continue with Google</button>
+
+  <!-- A modal over the page: the background is aria-hidden / inert, so only the
+       modal's copy has the role. -->
+  <div aria-hidden="true"><button class="save" id="bg-save">Save changes</button></div>
+  <div inert><button class="save" id="inert-save">Save changes</button></div>
+  <button class="save" id="invisible-save" style="visibility: hidden">Save changes</button>
+  <div role="dialog" aria-label="Settings"><button class="save" id="modal-save">Save changes</button></div>
+
+  <p>Please <b>check</b> your email for a link.</p>
+  <ul><li>first</li><li>brz_123 key</li><li>third</li></ul>
+</body></html>

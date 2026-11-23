@@ -26,6 +26,7 @@ import { AboutSection } from "./sections/About";
 import type { SettingsProps } from "./SettingRow";
 import { showMeAround } from "../../features/tour";
 import { useSync } from "../../entities/sync";
+import { CREATOR_DATA, CreatorSettingsSection, creatorTabLabel, useCreatorDraft } from "../../creator"; // creator fork seam
 
 type SectionProps = SettingsProps & {
   /** What is on disk, for what speaks of saved settings (the restart note). */
@@ -50,6 +51,7 @@ const SECTIONS: Record<SettingsTab, ComponentType<SectionProps>> = {
   sync: SyncSection,
   other: OtherSection,
   about: AboutSection,
+  creator: CreatorSettingsSection, // creator fork seam
 };
 
 // The open section's name, over its blocks (TYPE-10: the page's h1, then this
@@ -67,16 +69,17 @@ const TAB_LABEL: Record<SettingsTab, string> = {
   sync: "settings.tabSync",
   other: "settings.tabOther",
   about: "settings.tabAbout",
+  creator: "", // creator fork seam (its words are ours: creatorTabLabel)
 };
 
 export function SettingsPage() {
   const t = useT();
   const syncMissing = useSync((st) => st.missing);
-  const tab = useNav((st) => (syncMissing && st.settingsTab === "sync" ? "general" : st.settingsTab));
+  const tab = useNav((st) => ((syncMissing && st.settingsTab === "sync") || (!CREATOR_DATA && st.settingsTab === "creator") ? "general" : st.settingsTab)); // creator fork seam: no Creator tab before our backend, as Sync
   const openSettings = useNav((st) => st.openSettings);
   // The page's draft: nothing is written until Save; nothing shows until the
   // settings are read (LAYOUT-21).
-  const draft = useSettingsDraft();
+  const draft = useCreatorDraft(useSettingsDraft()); // creator fork seam: our tab's draft joins Shard's one draft
   // Leaving Settings with changes asks first (Save, Don't save, Cancel).
   useUnsaved(draft.dirty ? { id: "settings", label: t("settings.title"), save: draft.save, discard: draft.discard } : null);
   // Cmd/Ctrl+S saves. An app command cannot run in a field or a dialog, so
@@ -164,12 +167,13 @@ export function SettingsPage() {
               // A backend without sync commands (a build before them) has no Sync tab.
               ...(syncMissing ? [] : [{ value: "sync", label: t("settings.tabSync") }]),
               { value: "other", label: t("settings.tabOther") },
+              ...(CREATOR_DATA ? [{ value: "creator", label: creatorTabLabel() }] : []), // creator fork seam
               { value: "about", label: t("settings.tabAbout") },
             ]}
           />
           {/* The open section, named by its tab (A11Y-08; F8 keeps it). */}
           <TabPanel tabsId="settings" value={tab} className="flex flex-col gap-3.5">
-            <h2 className="m-0 text-panel-title text-text-strong-950">{t(TAB_LABEL[tab])}</h2>
+            <h2 className="m-0 text-panel-title text-text-strong-950">{tab === "creator" ? creatorTabLabel() : t(TAB_LABEL[tab])}</h2>{/* creator fork seam */}
             {draft.s && draft.saved
               // Keyed by the discards, so a field that holds text of its own starts over.
               ? <Section key={draft.epoch} s={draft.s} saved={draft.saved} setS={draft.set} p={draft.p} setP={draft.setP} api={api} setApi={setApi} apiError={apiError} retryApi={refreshApi} />
