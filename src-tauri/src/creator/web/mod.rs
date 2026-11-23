@@ -487,7 +487,7 @@ mod tests {
         let Some(b) = TestBrowser::launch().await else {
             return;
         };
-        let (url, _) = testkit::flaky_server(Duration::from_secs(60)).await;
+        let (url, hits) = testkit::flaky_server(Duration::from_secs(60)).await;
         let page = b.page().await;
         let t = std::time::Instant::now();
         let r = page.goto(&url).await;
@@ -495,11 +495,11 @@ mod tests {
             matches!(r, Err(WebError::Nav(ref e)) if e.starts_with("net::ERR_")),
             "{r:?}"
         );
+        // The try count is the contract; wall time only has a floor (a slow
+        // machine makes each failed load slower, never faster).
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), GOTO_TRIES);
         let took = t.elapsed();
-        assert!(
-            took >= 2 * GOTO_GAP && took < 3 * GOTO_GAP + Duration::from_secs(2),
-            "{took:?}"
-        );
+        assert!(took >= 2 * GOTO_GAP, "{took:?}");
     }
 
     #[tokio::test]
