@@ -38,6 +38,10 @@ pub enum Turnstile {
         presses: u32,
         delay_ms: u64,
     },
+    /// A drawn widget that has passed already; the page moves on `delay_ms` later.
+    Passed {
+        delay_ms: u64,
+    },
     /// "Complete this check" forever, nothing to press.
     Never,
 }
@@ -165,7 +169,6 @@ impl Site {
         let s = &server.site;
         let urls = Urls {
             login: format!("{s}/auth/login?next=/app/home"),
-            home: format!("{s}/app/home"),
             keys: format!("{s}/app/developer/api-keys"),
             welcome: format!("{s}/welcome"),
             key_test: format!("{s}/v1/balance"),
@@ -233,16 +236,18 @@ fn session_cookie() -> (header::HeaderName, String) {
 const LOGIN_PATH: &str = "/auth/login?next=/app/home";
 
 async fn login(Ax(st): Ax<Shared>, h: HeaderMap) -> Response {
+    let mut st = st.lock().unwrap();
+    st.seen.events.push("visit login".into());
     if signed(&h) {
         return to("/app/home");
     }
-    let st = st.lock().unwrap();
     let (mode, linger, presses, delay) = match st.k.turnstile {
         Turnstile::Pass => ("pass", 0, 0, 0),
         Turnstile::FailOnce => ("fail_once", 0, 0, 0),
         Turnstile::FailAlways => ("fail", 0, 0, 0),
         Turnstile::Linger(ms) => ("linger", ms, 0, 0),
         Turnstile::NeedsClick { presses, delay_ms } => ("click", 0, presses, delay_ms),
+        Turnstile::Passed { delay_ms } => ("passed", 0, 0, delay_ms),
         Turnstile::Never => ("never", 0, 0, 0),
     };
     page(

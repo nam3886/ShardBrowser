@@ -54,7 +54,6 @@ const CODES_JS: &str =
 #[derive(Clone, Debug)]
 pub struct Urls {
     pub login: String,
-    pub home: String,
     pub keys: String,
     /// The new-account survey; a finished one sends on to /app/home.
     pub welcome: String,
@@ -68,7 +67,6 @@ impl Urls {
     pub fn live() -> Urls {
         Urls {
             login: "https://breezeblue.ai/auth/login?next=/app/home".into(),
-            home: "https://breezeblue.ai/app/home".into(),
             keys: "https://breezeblue.ai/app/developer/api-keys".into(),
             welcome: "https://breezeblue.ai/welcome".into(),
             key_test: "https://api.breeze.blue/v1/balance".into(),

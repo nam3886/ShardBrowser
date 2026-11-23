@@ -40,13 +40,17 @@
   };
   if (!ready) { loading(); $("form").addEventListener("input", loading); }
   $("go").disabled = K.continue_disabled;
+  // Like a React form: Continue sends the form's own state, which typing
+  // updates, not what the inputs show.
+  window.store = { email: "", password: "" };
+  $("form").addEventListener("input", (e) => { store[e.target.id] = e.target.value; });
 
   $("go").addEventListener("click", async () => {
     ev("click Continue");
     if (!ready) return; // the form does nothing until its configuration has loaded
-    const body = JSON.stringify({ email: $("email").value, password: $("password").value });
+    const body = JSON.stringify({ email: store.email, password: store.password });
     const r = await (await fetch("/api/continue", { method: "POST", headers: { "content-type": "application/json" }, body })).json();
-    if (r.r === "reset") { $("email").value = ""; $("password").value = ""; }
+    if (r.r === "reset") { $("email").value = ""; $("password").value = ""; store.email = store.password = ""; }
     else if (r.r === "empty") say("Please enter your email address. Please enter your password.");
     else if (r.r === "in") location = "/welcome";
     else if (r.r === "wrong") say("We couldn’t continue with that email and password. Check the password");
@@ -58,6 +62,12 @@
     if (m === "pass") return check();
     if (m === "never") return say(TURNSTILE);
     if (m === "click") { say(TURNSTILE); return widget(); }
+    if (m === "passed") { // drawn and already passed: the page moves on a moment later
+      say(TURNSTILE);
+      widget();
+      document.querySelector("input[name=cf-turnstile-response]").value = "fixture-token";
+      return setTimeout(check, K.pass_delay_ms);
+    }
     failed(); // fail_once, fail, linger
   }
 
