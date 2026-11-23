@@ -6,9 +6,8 @@ use futures::channel::oneshot::Sender as OneshotSender;
 use futures::task::Poll;
 use serde::Serialize;
 
-use chromiumoxide_cdp::cdp::browser_protocol::page::NavigateParams;
 use chromiumoxide_cdp::cdp::browser_protocol::target::SessionId;
-use chromiumoxide_types::{Command, CommandResponse, Method, MethodId, Request, Response};
+use chromiumoxide_types::{Command, CommandResponse, Method, MethodId, Response};
 
 use crate::error::{CdpError, DeadlineExceeded, Result};
 use crate::handler::REQUEST_TIMEOUT;
@@ -54,11 +53,6 @@ impl<T> CommandMessage<T> {
         })
     }
 
-    /// Whether this command is a navigation
-    pub fn is_navigation(&self) -> bool {
-        self.method.as_ref() == NavigateParams::IDENTIFIER
-    }
-
     pub fn with_session<C: Command>(
         cmd: C,
         sender: OneshotSender<T>,
@@ -70,17 +64,6 @@ impl<T> CommandMessage<T> {
             params: serde_json::to_value(cmd)?,
             sender,
         })
-    }
-
-    pub fn split(self) -> (Request, OneshotSender<T>) {
-        (
-            Request {
-                method: self.method,
-                session_id: self.session_id.map(Into::into),
-                params: self.params,
-            },
-            self.sender,
-        )
     }
 }
 
