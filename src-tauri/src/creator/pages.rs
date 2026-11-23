@@ -972,26 +972,25 @@ mod tests {
             .mailbox_create("ele", "f@ele.example", "ele.example", "gone-tok")
             .unwrap()
             .id;
-        let t = |id, ele: Option<&EleClient>| test_one(&db, ele, &ol, id);
-        assert_eq!(t(active, None).await, "active");
-        assert_eq!(t(dead, None).await, "gone");
+        assert_eq!(test_one(&db, None, &ol, active).await, "active");
+        assert_eq!(test_one(&db, None, &ol, dead).await, "gone");
         assert_eq!(db.mailbox_get(dead).unwrap().unwrap().status, "gone");
         assert_eq!(
-            t(down_gone, None).await,
+            test_one(&db, None, &ol, down_gone).await,
             "failed",
             "a failure is never gone"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 3);
-        assert_eq!(t(busy, None).await, "active");
+        assert_eq!(test_one(&db, None, &ol, busy).await, "active");
         assert_eq!(
             calls.load(Ordering::SeqCst),
             3,
             "a running mailbox is not read"
         );
-        assert_eq!(t(ele_ok, Some(&ele)).await, "active");
-        assert_eq!(t(ele_404, Some(&ele)).await, "gone");
-        assert_eq!(t(ele_ok, None).await, "failed", "Ele not set");
-        assert_eq!(t(999, None).await, "failed");
+        assert_eq!(test_one(&db, Some(&ele), &ol, ele_ok).await, "active");
+        assert_eq!(test_one(&db, Some(&ele), &ol, ele_404).await, "gone");
+        assert_eq!(test_one(&db, None, &ol, ele_ok).await, "failed", "Ele not set");
+        assert_eq!(test_one(&db, None, &ol, 999).await, "failed");
     }
 
     #[tokio::test]

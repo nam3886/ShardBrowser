@@ -165,6 +165,6 @@ async fn live_outlook_test() {
         eprintln!("MAILBOX {id} {st}");
     }
     for s in ["active", "gone", "failed"] {
-        eprintln!("TOTAL {s}={}", states.iter().filter(|x| *x == s).count());
+        eprintln!("TOTAL {s}={}", states.iter().filter(|x| **x == s).count());
     }
 }
