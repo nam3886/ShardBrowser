@@ -118,6 +118,7 @@ pub fn error_code(err: &str) -> Option<&'static str> {
 /// Python `Code.streak`: whether a failure with this code counts toward a
 /// queue's fail streak (M5). Not the site's fault, or nothing a retry fixes:
 /// no.
+#[allow(dead_code)] // read by the queue's fail streak (M5)
 pub fn counts_toward_streak(code: &str) -> bool {
     !matches!(
         code,
