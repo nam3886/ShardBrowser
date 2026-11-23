@@ -20,7 +20,7 @@ use rand::Rng;
 use serde_json::json;
 
 use super::errors::error_code;
-use super::mail::{link_pick, wait_for_new_mail, EleClient, POLL_INTERVAL};
+use super::mail::{link_pick, wait_for_new_mail, EleClient, MailClient, POLL_INTERVAL};
 use super::providers::breezeblue::{self as bb, Timings, Urls, KEY};
 use super::providers::tts::{Inbox, TtsRun};
 use super::proxy::{self, NoHealthyProxy};
@@ -201,7 +201,7 @@ impl Inbox for EleInbox<'_> {
             #[cfg(test)]
             let pick = tests::loopback_http(pick);
             let link = wait_for_new_mail(
-                self.ele,
+                MailClient::Ele(self.ele),
                 &self.mailbox,
                 timeout,
                 pick,

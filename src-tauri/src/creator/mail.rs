@@ -1,20 +1,23 @@
-//! The Ele temp-mail client (Python `providers/ele.py` `EleClient`), the mail
-//! waits of `providers/outlook.py` (`link_pick`, `wait_for_new_mail`) and the
-//! HTML-to-text of mail bodies (`_html_text`). Mailboxes (token saved at
-//! creation) and received mail are kept in our store.
+//! The mail clients: Ele temp mail (Python `providers/ele.py` `EleClient`)
+//! and Outlook through Microsoft Graph (`providers/outlook.py`
+//! `OutlookClient`), the mail waits of `providers/outlook.py` (`link_pick`,
+//! `wait_for_new_mail`), the code reader (`ele.extract_otp`) and the
+//! HTML-to-text of mail bodies (`_html_text`). Mailboxes (their tokens) and
+//! received mail are kept in our store.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rand::seq::SliceRandom;
+use regex::Regex;
 use serde_json::Value;
 
 use super::store::{parse_iso, Db, MailMessage, Mailbox, NewMail};
 
-/// The Ele API is unavailable. Messages never hold URLs (they carry the
-/// mailbox token) or the API key.
+/// A mail API is unavailable (Ele or Outlook). Messages never hold URLs (an
+/// Ele URL carries the mailbox token), tokens, the API key or a body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EleError(pub String);
 
@@ -52,18 +55,94 @@ fn class(e: &reqwest::Error) -> &'static str {
 /// Seconds without a good inbox answer before a poll fails clearly.
 pub const UNAVAILABLE_AFTER: Duration = Duration::from_secs(30);
 
+const ELE_INBOX: &str = "Ele API unavailable: inbox ";
+const OUTLOOK_INBOX: &str = "Outlook unavailable: inbox ";
+
+/// A client's blip grace and reuse cutoffs (Python `_last_ok`, `_cutoff`).
+pub struct Grace {
+    /// Mailbox id -> last good inbox read.
+    last_ok: Mutex<HashMap<i64, Instant>>,
+    /// Reused mailbox id -> mail received at or before this (the provider's
+    /// clock, micros) is from a past run.
+    cutoff: Mutex<HashMap<i64, i64>>,
+    /// Python's class constant; a test shortens it.
+    pub unavailable_after: Duration,
+}
+
+impl Default for Grace {
+    fn default() -> Self {
+        Grace {
+            last_ok: Mutex::default(),
+            cutoff: Mutex::default(),
+            unavailable_after: UNAVAILABLE_AFTER,
+        }
+    }
+}
+
+impl Grace {
+    fn ok_now(&self, mailbox_id: i64) {
+        self.last_ok
+            .lock()
+            .unwrap()
+            .insert(mailbox_id, Instant::now());
+    }
+
+    /// A failed read: a blip (no mail) within the grace, an error after it;
+    /// `strict` (a reuse, a check) has no grace.
+    fn failed(
+        &self,
+        mailbox_id: i64,
+        prefix: &str,
+        reason: &str,
+        strict: bool,
+    ) -> Result<Vec<MailMessage>, EleError> {
+        let last = *self
+            .last_ok
+            .lock()
+            .unwrap()
+            .entry(mailbox_id)
+            .or_insert_with(Instant::now);
+        if strict || last.elapsed() >= self.unavailable_after {
+            return Err(EleError(format!("{prefix}{reason}")));
+        }
+        Ok(Vec::new())
+    }
+
+    fn cutoff_of(&self, mailbox_id: i64) -> Option<i64> {
+        self.cutoff.lock().unwrap().get(&mailbox_id).copied()
+    }
+
+    fn set_cutoff(&self, mailbox_id: i64, at: Option<i64>) {
+        let mut c = self.cutoff.lock().unwrap();
+        match at {
+            Some(t) => c.insert(mailbox_id, t),
+            None => c.remove(&mailbox_id),
+        };
+    }
+}
+
+/// After a strict poll on a reused mailbox: every mail without a code taken
+/// is "stale" (an old code or link is never used), and the newest dated mail
+/// seen now is the cutoff.
+fn mark_stale_and_cutoff(db: &Db, grace: &Grace, mailbox_id: i64) -> Result<(), EleError> {
+    let msgs = db.mail_list(mailbox_id).map_err(db_err)?;
+    for m in msgs.iter().filter(|m| m.otp_extracted.is_none()) {
+        db.mail_set_otp(m.id, "stale").map_err(db_err)?;
+    }
+    let newest = msgs
+        .iter()
+        .filter_map(|m| received(m.received_at.as_deref()))
+        .max();
+    grace.set_cutoff(mailbox_id, newest);
+    Ok(())
+}
+
 pub struct EleClient {
     http: reqwest::Client,
     base: String,
     key: String,
     db: Arc<Db>,
-    /// Python's class constant; a test shortens it.
-    pub unavailable_after: Duration,
-    /// Mailbox id -> last good inbox read.
-    last_ok: Mutex<HashMap<i64, Instant>>,
-    /// Reused mailbox id -> mail received at or before this (Ele's clock,
-    /// micros) is from a past run.
-    cutoff: Mutex<HashMap<i64, i64>>,
+    pub grace: Grace,
 }
 
 impl EleClient {
@@ -80,9 +159,7 @@ impl EleClient {
             base: format!("{}/", base_url.trim_end_matches('/')),
             key: api_key.to_string(),
             db,
-            unavailable_after: UNAVAILABLE_AFTER,
-            last_ok: Mutex::default(),
-            cutoff: Mutex::default(),
+            grace: Grace::default(),
         })
     }
 
@@ -91,13 +168,6 @@ impl EleClient {
             .request(method, format!("{}{path}", self.base))
             .header("X-API-Key", &self.key)
             .header("accept", "application/json")
-    }
-
-    fn ok_now(&self, mailbox_id: i64) {
-        self.last_ok
-            .lock()
-            .unwrap()
-            .insert(mailbox_id, Instant::now());
     }
 
     /// Active domains, blocked ones left out.
@@ -167,28 +237,8 @@ impl EleClient {
             .db
             .mailbox_create("ele", email, domain, token)
             .map_err(db_err)?;
-        self.ok_now(mb.id);
+        self.grace.ok_now(mb.id);
         Ok(mb)
-    }
-
-    /// A failed read: a blip (no mail) within the grace, an error after it;
-    /// `strict` (a reuse) has no grace.
-    fn failed(
-        &self,
-        mb: &Mailbox,
-        reason: &str,
-        strict: bool,
-    ) -> Result<Vec<MailMessage>, EleError> {
-        let last = *self
-            .last_ok
-            .lock()
-            .unwrap()
-            .entry(mb.id)
-            .or_insert_with(Instant::now);
-        if strict || last.elapsed() >= self.unavailable_after {
-            return Err(unavailable(format!("inbox {reason}")));
-        }
-        Ok(Vec::new())
     }
 
     /// Fetch the inbox, store mail not seen before, return the NEW rows.
@@ -197,13 +247,14 @@ impl EleClient {
     }
 
     async fn poll(&self, mb: &Mailbox, strict: bool) -> Result<Vec<MailMessage>, EleError> {
+        let failed = |reason: &str| self.grace.failed(mb.id, ELE_INBOX, reason, strict);
         let r = match self
             .req(reqwest::Method::GET, &format!("inbox/{}/emails", mb.token))
             .send()
             .await
         {
             Ok(r) => r,
-            Err(e) => return self.failed(mb, class(&e), strict),
+            Err(e) => return failed(class(&e)),
         };
         let status = r.status().as_u16();
         if status == 404 {
@@ -211,16 +262,16 @@ impl EleClient {
             self.db.mailbox_set_status(mb.id, "gone").map_err(db_err)?;
         }
         if status != 200 {
-            return self.failed(mb, &format!("HTTP {status}"), strict);
+            return failed(&format!("HTTP {status}"));
         }
         self.db
             .mailbox_set_status(mb.id, "active")
             .map_err(db_err)?;
         let items = match r.json::<Value>().await {
             Ok(v) if v.is_object() => v["emails"].as_array().cloned().unwrap_or_default(),
-            _ => return self.failed(mb, "unreadable response", strict),
+            _ => return failed("unreadable response"),
         };
-        self.ok_now(mb.id);
+        self.grace.ok_now(mb.id);
 
         let existing = self.db.mail_list(mb.id).map_err(db_err)?;
         let by_id: HashMap<String, MailMessage> = existing
@@ -277,26 +328,290 @@ impl EleClient {
     /// link is never used. Any inbox failure is an error at once.
     pub async fn reuse_mailbox(&self, mb: &Mailbox) -> Result<(), EleError> {
         self.poll(mb, true).await?;
-        let msgs = self.db.mail_list(mb.id).map_err(db_err)?;
-        for m in msgs.iter().filter(|m| m.otp_extracted.is_none()) {
-            self.db.mail_set_otp(m.id, "stale").map_err(db_err)?;
+        mark_stale_and_cutoff(&self.db, &self.grace, mb.id)
+    }
+}
+
+/// Microsoft's endpoints (Python `TOKEN_URL`, `GRAPH_URL`); a test points
+/// them at a fake.
+#[derive(Clone, Debug)]
+pub struct OutlookUrls {
+    pub token: String,
+    pub graph: String,
+}
+
+const GRAPH_QUERY: &str = "$top=20&$select=id,subject,from,body,bodyPreview,receivedDateTime&$orderby=receivedDateTime desc";
+
+impl OutlookUrls {
+    pub fn live() -> OutlookUrls {
+        OutlookUrls {
+            token: "https://login.live.com/oauth20_token.srf".into(),
+            graph: format!("https://graph.microsoft.com/v1.0/me/messages?{GRAPH_QUERY}"),
         }
-        // In Ele's own clock: the newest dated mail seen now.
-        let newest = msgs
-            .iter()
-            .filter_map(|m| received(m.received_at.as_deref()))
-            .max();
-        let mut cutoff = self.cutoff.lock().unwrap();
-        match newest {
-            Some(t) => cutoff.insert(mb.id, t),
-            None => cutoff.remove(&mb.id),
+    }
+
+    /// The same paths under `/ms/` of a test server.
+    #[cfg(test)]
+    pub fn on(site: &str) -> OutlookUrls {
+        OutlookUrls {
+            token: format!("{site}/ms/oauth20_token.srf"),
+            graph: format!("{site}/ms/v1.0/me/messages?{GRAPH_QUERY}"),
+        }
+    }
+}
+
+const SCOPE: &str = "https://graph.microsoft.com/Mail.Read offline_access";
+
+fn outlook_store_err(_: anyhow::Error) -> EleError {
+    EleError(format!("{OUTLOOK_INBOX}local store error"))
+}
+
+/// An Outlook mailbox read through Microsoft Graph with its refresh token,
+/// which Microsoft rotates: the new one is saved before anything else, and
+/// every poll reads the token from the row (never from the `Mailbox` given).
+pub struct OutlookClient {
+    http: reqwest::Client,
+    db: Arc<Db>,
+    urls: OutlookUrls,
+    pub grace: Grace,
+}
+
+impl OutlookClient {
+    pub fn new(db: Arc<Db>, urls: OutlookUrls) -> Result<OutlookClient, EleError> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|_| EleError(format!("{OUTLOOK_INBOX}client setup failed")))?;
+        Ok(OutlookClient {
+            http,
+            db,
+            urls,
+            grace: Grace::default(),
+        })
+    }
+
+    /// Refresh the token, read the inbox via Graph, store unseen mail, return
+    /// the NEW rows. Only a dead grant (`invalid_grant`) marks it gone.
+    pub async fn poll_inbox(&self, mb: &Mailbox) -> Result<Vec<MailMessage>, EleError> {
+        self.poll(mb, false).await
+    }
+
+    async fn poll(&self, mb: &Mailbox, strict: bool) -> Result<Vec<MailMessage>, EleError> {
+        let failed = |reason: &str| self.grace.failed(mb.id, OUTLOOK_INBOX, reason, strict);
+        let row = self
+            .db
+            .mailbox_get(mb.id)
+            .map_err(outlook_store_err)?
+            .ok_or_else(|| EleError(format!("{OUTLOOK_INBOX}not found")))?;
+        let form = [
+            ("client_id", row.client_id.as_deref().unwrap_or("")),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", row.token.as_str()),
+            ("scope", SCOPE),
+        ];
+        let t = match self.http.post(&self.urls.token).form(&form).send().await {
+            Ok(t) => t,
+            Err(e) => return failed(class(&e)),
         };
-        Ok(())
+        let status = t.status().as_u16();
+        if status == 400 || status == 401 {
+            let body: Value = t.json().await.unwrap_or(Value::Null);
+            // Throttling and other AAD errors are temporary: only a dead grant is gone.
+            if body.get("error").and_then(Value::as_str) != Some("invalid_grant") {
+                return failed(&format!("token HTTP {status}"));
+            }
+            self.db
+                .mailbox_set_status(mb.id, "gone")
+                .map_err(outlook_store_err)?;
+            return Ok(Vec::new());
+        }
+        if status != 200 {
+            return failed(&format!("token HTTP {status}"));
+        }
+        let tok: Value = t.json().await.unwrap_or(Value::Null);
+        let Some(access) = tok.get("access_token").and_then(Value::as_str) else {
+            return failed("unreadable token response");
+        };
+        if let Some(new_rt) = tok.get("refresh_token").and_then(Value::as_str) {
+            if !new_rt.is_empty() && new_rt != row.token {
+                // Losing it kills the mailbox: saved before anything else.
+                self.db
+                    .mailbox_set_token(mb.id, new_rt)
+                    .map_err(outlook_store_err)?;
+            }
+        }
+        let r = match self.http.get(&self.urls.graph).bearer_auth(access).send().await {
+            Ok(r) => r,
+            Err(e) => return failed(class(&e)),
+        };
+        if r.status() != 200 {
+            return failed(&format!("HTTP {}", r.status().as_u16()));
+        }
+        let items = match r.json::<Value>().await {
+            Ok(Value::Object(o)) => o
+                .get("value")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            _ => return failed("unreadable response"),
+        };
+        self.db
+            .mailbox_set_status(mb.id, "active")
+            .map_err(outlook_store_err)?;
+        self.grace.ok_now(mb.id);
+
+        let mut seen: HashSet<String> = self
+            .db
+            .mail_list(mb.id)
+            .map_err(outlook_store_err)?
+            .into_iter()
+            .filter_map(|m| m.ele_message_id)
+            .collect();
+        let mut new = Vec::new();
+        for it in items.iter().filter(|it| it.is_object()) {
+            let mid = match &it["id"] {
+                Value::Null => continue,
+                Value::String(s) if s.is_empty() => continue,
+                Value::String(s) => s.clone(),
+                v => v.to_string(),
+            };
+            if !seen.insert(mid.clone()) {
+                continue;
+            }
+            let content = it["body"]["content"].as_str().unwrap_or("");
+            let row = NewMail {
+                ele_message_id: Some(mid),
+                sender: it["from"]["emailAddress"]["address"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                subject: it["subject"].as_str().unwrap_or("").to_string(),
+                body: html_text(content),
+                html: (it["body"]["contentType"].as_str() == Some("html"))
+                    .then(|| content.to_string()),
+                received_at: it["receivedDateTime"].as_str().map(str::to_string),
+            };
+            new.push(self.db.mail_create(mb.id, &row).map_err(outlook_store_err)?);
+        }
+        Ok(new)
+    }
+
+    /// Ele's `reuse_mailbox`, on Outlook (Python shares the body).
+    pub async fn reuse_mailbox(&self, mb: &Mailbox) -> Result<(), EleError> {
+        self.poll(mb, true).await?;
+        mark_stale_and_cutoff(&self.db, &self.grace, mb.id)
+    }
+}
+
+/// The inbox reader of one mailbox (Python `mail_client`).
+#[derive(Clone, Copy)]
+pub enum MailClient<'a> {
+    Ele(&'a EleClient),
+    Outlook(&'a OutlookClient),
+}
+
+impl MailClient<'_> {
+    pub async fn poll_inbox(&self, mb: &Mailbox) -> Result<Vec<MailMessage>, EleError> {
+        match self {
+            MailClient::Ele(c) => c.poll_inbox(mb).await,
+            MailClient::Outlook(c) => c.poll_inbox(mb).await,
+        }
+    }
+
+    pub async fn reuse_mailbox(&self, mb: &Mailbox) -> Result<(), EleError> {
+        match self {
+            MailClient::Ele(c) => c.reuse_mailbox(mb).await,
+            MailClient::Outlook(c) => c.reuse_mailbox(mb).await,
+        }
+    }
+
+    /// One poll with no blip grace (Python's `_last_ok = -inf`): a failure is
+    /// an error at once. A dead Outlook grant is not an error: the row is gone.
+    pub async fn check(&self, mb: &Mailbox) -> Result<(), EleError> {
+        match self {
+            MailClient::Ele(c) => c.poll(mb, true).await.map(drop),
+            MailClient::Outlook(c) => c.poll(mb, true).await.map(drop),
+        }
     }
 
     fn cutoff_of(&self, mailbox_id: i64) -> Option<i64> {
-        self.cutoff.lock().unwrap().get(&mailbox_id).copied()
+        match self {
+            MailClient::Ele(c) => c.grace.cutoff_of(mailbox_id),
+            MailClient::Outlook(c) => c.grace.cutoff_of(mailbox_id),
+        }
     }
+}
+
+/// Codes that read as words, never a code (Python `IGNORE_WORDS`).
+const IGNORE_WORDS: [&str; 7] = [
+    "SIGNIN", "PLEASE", "GOOGLE", "ACCESS", "SIGNUP", "VERIFY", "CLOUDS",
+];
+
+fn re(p: &str) -> Regex {
+    Regex::new(p).unwrap()
+}
+
+/// Python's `(?=[A-Za-z]*\d)[A-Za-z0-9]{6}`: group 1 holding a digit. A
+/// candidate without one is skipped and the search goes on from its next
+/// character, as Python's search would.
+fn with_digit(r: &Regex, t: &str) -> Option<String> {
+    let mut at = 0;
+    while let Some(c) = r.captures_at(t, at) {
+        let g = c.get(1).unwrap().as_str();
+        if g.bytes().any(|b| b.is_ascii_digit()) {
+            return Some(g.to_string());
+        }
+        at = c.get(0).unwrap().start() + 1;
+        while !t.is_char_boundary(at) {
+            at += 1;
+        }
+    }
+    None
+}
+
+static OTP: LazyLock<[Regex; 10]> = LazyLock::new(|| {
+    [
+        re(r"(?i)(?:one-time\s*)?verification\s*code\s*is:?\s*([A-Za-z0-9]{6})\b"),
+        re(r"(?i)(?:verification\s*code|verify|your\s*code|enter\s*code|security\s*code)[^\w]{1,40}([A-Za-z0-9]{6})\b"),
+        re(r"(?i)(?:confirmation|verification|security)\s*code\s*is:?\s*(\d{5,8})\b"),
+        re(r"(?i)G-(\d{6})\b"),
+        re(r"(?i)(?:code|verify|verification)[^\d]{1,25}(\d{3})\s+(\d{3})\b"),
+        re(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.\-]+"),
+        re(r"(?i)[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"),
+        re(r"\b([A-Z0-9]{6})\b"),
+        re(r"<[^>]+>"),
+        re(r"\s+"),
+    ]
+});
+
+/// A sign-in or verify code in a mail's text (Python `ele.extract_otp`,
+/// every pattern in its order, then the fallback). Letter codes are
+/// upper-cased.
+pub fn extract_otp(text: &str) -> Option<String> {
+    let [p1, p2, p3, p4, p5, mail, uuid, word, tag, ws] = &*OTP;
+    if text.is_empty() {
+        return None;
+    }
+    let t = tag.replace_all(text, " ").replace("&nbsp;", " ");
+    let t = ws.replace_all(&t, " ");
+    if let Some(c) = with_digit(p1, &t).or_else(|| with_digit(p2, &t)) {
+        return Some(c.to_uppercase());
+    }
+    if let Some(c) = p3.captures(&t).or_else(|| p4.captures(&t)) {
+        return Some(c[1].to_string());
+    }
+    if let Some(c) = p5.captures(&t) {
+        return Some(format!("{}{}", &c[1], &c[2]));
+    }
+    let f = mail.replace_all(&t, " ");
+    let f = uuid.replace_all(&f, " ");
+    word.captures_iter(&f)
+        .map(|c| c[1].to_string())
+        .filter(|c| c.bytes().any(|b| b.is_ascii_digit()))
+        .find(|c| {
+            !IGNORE_WORDS.contains(&c.as_str())
+                && !["201", "202", "203"].iter().any(|y| c.starts_with(y))
+        })
 }
 
 fn truthy(v: &Value) -> bool {
@@ -376,7 +691,7 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(4);
 /// dated at or before the reuse cutoff is dropped. Newest first within a
 /// poll; None at the deadline or once `stop()` is true (checked after every poll).
 pub async fn wait_for_new_mail(
-    client: &EleClient,
+    client: MailClient<'_>,
     mb: &Mailbox,
     timeout: Duration,
     pick: impl Fn(&MailMessage) -> Option<String>,
@@ -690,7 +1005,7 @@ mod tests {
         let mb = e.ele.create_mailbox().await.unwrap();
         e.fake.lock().unwrap().inbox_status = 503;
         assert!(e.ele.poll_inbox(&mb).await.unwrap().is_empty());
-        e.ele.unavailable_after = Duration::ZERO;
+        e.ele.grace.unavailable_after = Duration::ZERO;
         let err = e.ele.poll_inbox(&mb).await.unwrap_err();
         assert_eq!(err.0, "Ele API unavailable: inbox HTTP 503");
     }
@@ -734,7 +1049,7 @@ mod tests {
                 ("2".to_string(), Some("stale".to_string()))
             ])
         );
-        assert_eq!(e.ele.cutoff_of(mb.id), parse_iso("2026-10-25T10:00:00"));
+        assert_eq!(e.ele.grace.cutoff_of(mb.id), parse_iso("2026-10-25T10:00:00"));
 
         // An inbox that cannot be read fails a reuse at once.
         e.fake.lock().unwrap().inbox_status = 404;
@@ -748,7 +1063,7 @@ mod tests {
         e.fake.lock().unwrap().inbox_status = 200;
         set_emails(&e, serde_json::json!([]));
         e.ele.reuse_mailbox(&mb2).await.unwrap();
-        assert_eq!(e.ele.cutoff_of(mb2.id), None);
+        assert_eq!(e.ele.grace.cutoff_of(mb2.id), None);
     }
 
     fn link(n: u32, at: Option<&str>) -> Value {
@@ -773,7 +1088,7 @@ mod tests {
         e.ele.reuse_mailbox(&mb).await.unwrap();
         // Stored by the reuse: not new, never used.
         assert_eq!(
-            wait_for_new_mail(&e.ele, &mb, Duration::ZERO, &pick, FAST, None)
+            wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::ZERO, &pick, FAST, None)
                 .await
                 .unwrap(),
             None
@@ -787,7 +1102,7 @@ mod tests {
             ]),
         );
         assert_eq!(
-            wait_for_new_mail(&e.ele, &mb, Duration::ZERO, &pick, FAST, None)
+            wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::ZERO, &pick, FAST, None)
                 .await
                 .unwrap(),
             None
@@ -798,7 +1113,7 @@ mod tests {
             serde_json::json!([link(3, Some("2026-10-25T10:01:00"))]),
         );
         assert_eq!(
-            wait_for_new_mail(&e.ele, &mb, Duration::ZERO, &pick, FAST, None)
+            wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::ZERO, &pick, FAST, None)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -808,7 +1123,7 @@ mod tests {
             &e,
             serde_json::json!([link(4, None), link(5, Some("2026-10-25"))]),
         );
-        let got = wait_for_new_mail(&e.ele, &mb, Duration::ZERO, &pick, FAST, None)
+        let got = wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::ZERO, &pick, FAST, None)
             .await
             .unwrap();
         assert!(
@@ -829,7 +1144,7 @@ mod tests {
         let stop = || true;
         assert_eq!(
             wait_for_new_mail(
-                &e.ele,
+                MailClient::Ele(&e.ele),
                 &mb,
                 Duration::from_secs(5),
                 &pick,
@@ -846,7 +1161,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             fake.lock().unwrap().emails = vec![link(1, None)];
         });
-        let got = wait_for_new_mail(&e.ele, &mb, Duration::from_secs(5), &pick, FAST, None)
+        let got = wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::from_secs(5), &pick, FAST, None)
             .await
             .unwrap();
         assert_eq!(got.as_deref(), Some("https://b.ai/verify?t=1"));
@@ -902,7 +1217,7 @@ mod tests {
     async fn errors_never_hold_token_or_key() {
         let mut e = env().await;
         let mb = e.ele.create_mailbox().await.unwrap();
-        e.ele.unavailable_after = Duration::ZERO;
+        e.ele.grace.unavailable_after = Duration::ZERO;
         let mut errs = Vec::new();
         for status in [404, 500] {
             e.fake.lock().unwrap().inbox_status = status;
@@ -937,5 +1252,387 @@ mod tests {
             "Confirm your email\nYour confirmation code is 48219\n\nTom & Jerry"
         );
         assert_eq!(html_text("a&nbsp; b &#33;&#x41;<!-- <p> -->c"), "a b !Ac");
+    }
+
+    // ---- Outlook (Python tests/test_outlook.py)
+
+    struct OFake {
+        token: (u16, Value),
+        graph: (u16, Value),
+        /// `refresh_token` of each token call, in order.
+        refresh_seen: Vec<String>,
+    }
+
+    type OShared = Arc<Mutex<OFake>>;
+
+    fn msg_json() -> Value {
+        serde_json::json!({
+            "id": "AAA1", "subject": "Your code is: ABC123 verification code",
+            "receivedDateTime": "2026-11-17T10:00:00Z",
+            "from": { "emailAddress": { "address": "no-reply@sender.example" } },
+            "body": { "content": "<p>Hi <b>there</b></p>" },
+        })
+    }
+
+    async fn outlook_server(fake: OShared) -> FixtureServer {
+        use axum::extract::RawQuery;
+        use axum::Form;
+        let app = Router::new()
+            .route(
+                "/ms/oauth20_token.srf",
+                post(
+                    |State(f): State<OShared>, Form(form): Form<HashMap<String, String>>| async move {
+                        assert_eq!(form["client_id"], "CID");
+                        assert_eq!(form["grant_type"], "refresh_token");
+                        assert_eq!(form["scope"], SCOPE);
+                        let mut f = f.lock().unwrap();
+                        f.refresh_seen.push(form["refresh_token"].clone());
+                        let (code, body) = f.token.clone();
+                        (StatusCode::from_u16(code).unwrap(), Json(body))
+                    },
+                ),
+            )
+            .route(
+                "/ms/v1.0/me/messages",
+                get(
+                    |State(f): State<OShared>, h: HeaderMap, RawQuery(q): RawQuery| async move {
+                        assert_eq!(h["authorization"], "Bearer AT");
+                        assert_eq!(q.as_deref(), Some(GRAPH_QUERY.replace(' ', "%20").as_str()));
+                        let (code, body) = f.lock().unwrap().graph.clone();
+                        (StatusCode::from_u16(code).unwrap(), Json(body))
+                    },
+                ),
+            )
+            .with_state(fake);
+        FixtureServer::start_with(app).await
+    }
+
+    struct OEnv {
+        db: Arc<Db>,
+        fake: OShared,
+        cl: OutlookClient,
+        mb: Mailbox,
+        _srv: FixtureServer,
+        _f: crate::creator::store::TempFile,
+    }
+
+    async fn oenv() -> OEnv {
+        let (db, f) = temp_db();
+        let db = Arc::new(db);
+        let fake: OShared = Arc::new(Mutex::new(OFake {
+            token: (
+                200,
+                serde_json::json!({ "access_token": "AT", "refresh_token": "NEW" }),
+            ),
+            graph: (200, serde_json::json!({ "value": [msg_json()] })),
+            refresh_seen: Vec::new(),
+        }));
+        let srv = outlook_server(fake.clone()).await;
+        let cl = OutlookClient::new(db.clone(), OutlookUrls::on(&srv.site)).unwrap();
+        let mb =
+            db.mailbox_create("outlook", "a@outlook.example", "outlook.example", "OLD")
+                .unwrap();
+        db.exec_for_test(&format!(
+            "UPDATE mailboxes SET client_id='CID' WHERE id={}",
+            mb.id
+        ));
+        let mb = db.mailbox_get(mb.id).unwrap().unwrap();
+        OEnv {
+            db,
+            fake,
+            cl,
+            mb,
+            _srv: srv,
+            _f: f,
+        }
+    }
+
+    impl OEnv {
+        fn token(&self, code: u16, body: Value) {
+            self.fake.lock().unwrap().token = (code, body);
+        }
+        fn graph(&self, code: u16, body: Value) {
+            self.fake.lock().unwrap().graph = (code, body);
+        }
+        fn row(&self) -> Mailbox {
+            self.db.mailbox_get(self.mb.id).unwrap().unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_maps_mail() {
+        let e = oenv().await;
+        assert_eq!(e.cl.poll_inbox(&e.mb).await.unwrap().len(), 1);
+        let m = &e.db.mail_list(e.mb.id).unwrap()[0];
+        assert_eq!(
+            (
+                m.ele_message_id.as_deref(),
+                m.sender.as_deref(),
+                m.subject.as_deref(),
+                m.body.as_deref(),
+                m.received_at.as_deref()
+            ),
+            (
+                Some("AAA1"),
+                Some("no-reply@sender.example"),
+                Some("Your code is: ABC123 verification code"),
+                Some("Hi there"),
+                Some("2026-11-17T10:00:00Z")
+            )
+        );
+        assert_eq!(extract_otp(m.subject.as_deref().unwrap()).as_deref(), Some("ABC123"));
+    }
+
+    #[tokio::test]
+    async fn poll_persists_rotated_token() {
+        let e = oenv().await;
+        e.cl.poll_inbox(&e.mb).await.unwrap();
+        assert_eq!(e.row().token, "NEW");
+    }
+
+    #[tokio::test]
+    async fn second_poll_uses_the_rotated_token() {
+        let e = oenv().await;
+        // The same `Mailbox` value both times: the token comes from the row.
+        e.cl.poll_inbox(&e.mb).await.unwrap();
+        e.cl.poll_inbox(&e.mb).await.unwrap();
+        assert_eq!(e.fake.lock().unwrap().refresh_seen, ["OLD", "NEW"]);
+    }
+
+    #[tokio::test]
+    async fn rotated_token_is_saved_even_when_graph_fails() {
+        let e = oenv().await;
+        e.graph(503, serde_json::json!({}));
+        assert!(e.cl.poll_inbox(&e.mb).await.unwrap().is_empty());
+        let row = e.row();
+        assert_eq!((row.token.as_str(), row.status.as_str()), ("NEW", "active"));
+    }
+
+    #[tokio::test]
+    async fn poll_dedup() {
+        let e = oenv().await;
+        e.cl.poll_inbox(&e.mb).await.unwrap();
+        assert!(e.cl.poll_inbox(&e.mb).await.unwrap().is_empty());
+        assert_eq!(e.db.mail_list(e.mb.id).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn poll_invalid_grant_marks_gone() {
+        let e = oenv().await;
+        e.token(400, serde_json::json!({ "error": "invalid_grant" }));
+        assert!(e.cl.poll_inbox(&e.mb).await.unwrap().is_empty());
+        assert_eq!(e.row().status, "gone");
+        // Strict too: a dead grant is an answer, not an error.
+        MailClient::Outlook(&e.cl).check(&e.mb).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn poll_other_400_not_gone() {
+        for body in [
+            serde_json::json!({ "error": "temporarily_unavailable" }),
+            serde_json::json!({ "error": "invalid_request", "error_codes": [90033] }),
+            serde_json::json!({}),
+        ] {
+            let e = oenv().await;
+            e.token(400, body.clone());
+            assert!(e.cl.poll_inbox(&e.mb).await.unwrap().is_empty(), "{body}");
+            assert_eq!(e.row().status, "active", "{body}");
+            e.token(401, body.clone());
+            assert!(e.cl.poll_inbox(&e.mb).await.unwrap().is_empty(), "{body}");
+            assert_eq!(e.row().status, "active", "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_429_and_5xx_are_transient() {
+        let mut e = oenv().await;
+        e.token(429, serde_json::json!({}));
+        assert!(e.cl.poll_inbox(&e.mb).await.unwrap().is_empty());
+        e.token(
+            200,
+            serde_json::json!({ "access_token": "AT", "refresh_token": "NEW" }),
+        );
+        e.graph(503, serde_json::json!({}));
+        assert!(e.cl.poll_inbox(&e.mb).await.unwrap().is_empty());
+        assert_eq!(e.row().status, "active");
+        e.cl.grace.unavailable_after = Duration::ZERO;
+        let err = e.cl.poll_inbox(&e.mb).await.unwrap_err();
+        assert_eq!(err.0, "Outlook unavailable: inbox HTTP 503");
+        e.token(429, serde_json::json!({}));
+        let err = e.cl.poll_inbox(&e.mb).await.unwrap_err();
+        assert_eq!(err.0, "Outlook unavailable: inbox token HTTP 429");
+        assert_eq!(e.row().status, "active");
+    }
+
+    #[tokio::test]
+    async fn poll_stores_html_only_for_html_content() {
+        let e = oenv().await;
+        let mut html = msg_json();
+        html["body"] = serde_json::json!({ "contentType": "html", "content": "<p>hi</p>" });
+        let mut text = msg_json();
+        text["id"] = "AAA2".into();
+        text["body"] = serde_json::json!({ "contentType": "text", "content": "plain" });
+        e.graph(200, serde_json::json!({ "value": [html, text] }));
+        e.cl.poll_inbox(&e.mb).await.unwrap();
+        let rows: HashMap<_, _> =
+            e.db.mail_list(e.mb.id)
+                .unwrap()
+                .into_iter()
+                .map(|m| (m.ele_message_id.clone().unwrap(), m))
+                .collect();
+        assert_eq!(
+            (rows["AAA1"].html.as_deref(), rows["AAA1"].body.as_deref()),
+            (Some("<p>hi</p>"), Some("hi"))
+        );
+        let a = &rows["AAA1"];
+        let code = extract_otp(&format!(
+            "{}{}",
+            a.subject.as_deref().unwrap(),
+            a.body.as_deref().unwrap()
+        ));
+        assert_eq!(code.as_deref(), Some("ABC123"));
+        assert_eq!(rows["AAA2"].html, None);
+    }
+
+    #[tokio::test]
+    async fn reuse_mailbox_then_poll_returns_only_new() {
+        let e = oenv().await;
+        let mut old = msg_json();
+        old["id"] = "OLD1".into();
+        e.graph(200, serde_json::json!({ "value": [old.clone()] }));
+        e.cl.reuse_mailbox(&e.mb).await.unwrap();
+        assert_eq!(e.row().token, "NEW");
+        let ids: Vec<_> =
+            e.db.mail_list(e.mb.id)
+                .unwrap()
+                .into_iter()
+                .map(|m| (m.ele_message_id.unwrap(), m.otp_extracted))
+                .collect();
+        assert_eq!(ids, [("OLD1".to_string(), Some("stale".to_string()))]);
+        e.token(
+            200,
+            serde_json::json!({ "access_token": "AT", "refresh_token": "NEWER" }),
+        );
+        let mut n2 = msg_json();
+        n2["id"] = "N2".into();
+        e.graph(200, serde_json::json!({ "value": [n2, old] }));
+        let new = e.cl.poll_inbox(&e.mb).await.unwrap();
+        assert_eq!(
+            new.iter()
+                .map(|m| m.ele_message_id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["N2"]
+        );
+        assert_eq!(e.row().token, "NEWER");
+        e.token(500, serde_json::json!({}));
+        assert!(e.cl.reuse_mailbox(&e.mb).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn wait_for_new_mail_on_outlook_drops_mail_at_or_before_the_cutoff() {
+        let e = oenv().await;
+        let at = |id: &str, t: &str| {
+            let mut m = msg_json();
+            m["id"] = id.into();
+            m["receivedDateTime"] = t.into();
+            m
+        };
+        let old = at("OLD1", "2026-11-19T10:00:00Z");
+        e.graph(200, serde_json::json!({ "value": [old.clone()] }));
+        let client = MailClient::Outlook(&e.cl);
+        client.reuse_mailbox(&e.mb).await.unwrap();
+        let pick = |m: &MailMessage| m.ele_message_id.clone();
+        // A late old mail (dated at the cutoff and before it): dropped.
+        e.graph(
+            200,
+            serde_json::json!({ "value": [old.clone(), at("L1", "2026-11-19T10:00:00Z"), at("L2", "2026-11-19T09:59:00Z")] }),
+        );
+        let got = wait_for_new_mail(client, &e.mb, Duration::ZERO, pick, FAST, None)
+            .await
+            .unwrap();
+        assert_eq!(got, None);
+        e.graph(
+            200,
+            serde_json::json!({ "value": [at("N1", "2026-11-19T10:01:00Z"), old] }),
+        );
+        let got = wait_for_new_mail(client, &e.mb, Duration::ZERO, pick, FAST, None)
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("N1"));
+    }
+
+    #[tokio::test]
+    async fn outlook_errors_hold_no_token() {
+        let mut e = oenv().await;
+        e.cl.grace.unavailable_after = Duration::ZERO;
+        let mut errs = Vec::new();
+        for (code, body) in [
+            (500, serde_json::json!({ "error": "x", "refresh_token": "NEW" })),
+            (429, serde_json::json!({})),
+            (400, serde_json::json!({ "error": "temporarily_unavailable" })),
+            (200, serde_json::json!({ "refresh_token": "NEW" })),
+        ] {
+            e.token(code, body);
+            errs.push(e.cl.poll_inbox(&e.mb).await.unwrap_err());
+        }
+        e.token(
+            200,
+            serde_json::json!({ "access_token": "AT", "refresh_token": "NEW" }),
+        );
+        e.graph(503, serde_json::json!({ "error": "AT" }));
+        errs.push(e.cl.poll_inbox(&e.mb).await.unwrap_err());
+        e.graph(200, serde_json::json!(["not an object"]));
+        errs.push(e.cl.poll_inbox(&e.mb).await.unwrap_err());
+        // Nobody listening: a network error.
+        let dead = OutlookClient::new(e.db.clone(), OutlookUrls::on("http://127.0.0.1:9")).unwrap();
+        errs.push(MailClient::Outlook(&dead).check(&e.mb).await.unwrap_err());
+        let at = Regex::new(r"\bAT\b").unwrap();
+        for err in &errs {
+            assert!(err.0.starts_with("Outlook unavailable: inbox "), "{err}");
+            for secret in [
+                "OLD",
+                "NEW",
+                "CID",
+                "login.live.com",
+                "graph.microsoft.com",
+                "127.0.0.1",
+                "http",
+            ] {
+                assert!(!err.0.contains(secret), "{err}");
+            }
+            assert!(!at.is_match(&err.0), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_debug_masks_token_and_client_id() {
+        let e = oenv().await;
+        let s = format!("{:?}", e.mb);
+        assert!(!s.contains("OLD") && !s.contains("CID"), "{s}");
+        assert!(s.contains("***"), "{s}");
+    }
+
+    #[test]
+    fn extract_otp_cases() {
+        for (text, code) in [
+            ("Your verification code is: 123456", Some("123456")),
+            ("<p>G-482910 is your code</p>", Some("482910")),
+            ("enter code 123 456", Some("123456")),
+            ("nothing here", None),
+            ("", None),
+            (&html_text(HTML), Some("48219")),
+            ("Hi\n123456\nthanks", Some("123456")),
+            (
+                "Fish Audio: Your verification code Your verification code is INSIDE this email. Code: 378554",
+                Some("378554"),
+            ),
+            (
+                "Fish Audio: Your verification code\nINSIDE\nverify your email 378554",
+                Some("378554"),
+            ),
+            ("Welcome 2026, total $19.99, zip 90210", None),
+        ] {
+            assert_eq!(extract_otp(text).as_deref(), code, "{text:?}");
+        }
     }
 }

@@ -456,7 +456,7 @@ async fn ele_inbox_errors_hold_no_url_token_or_key() {
         // Past the blip grace: a failed poll is an error at once.
         {
             let mut ele = EleClient::new(&ele.site, ELE_KEY, cx.db.clone()).unwrap();
-            ele.unavailable_after = Duration::ZERO;
+            ele.grace.unavailable_after = Duration::ZERO;
             let inbox = EleInbox {
                 ele: &ele,
                 mailbox: mb.clone(),

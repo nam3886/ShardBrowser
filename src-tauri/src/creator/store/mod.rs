@@ -120,15 +120,34 @@ pub fn parse_iso(s: &str) -> Option<i64> {
     Some(secs * 1_000_000 + micros)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Mailbox {
     pub id: i64,
     pub provider: String,
     pub email: String,
     pub domain: String,
+    /// Ele's mailbox token or Outlook's refresh token: a secret.
     pub token: String,
     pub status: String,
     pub created_at: String,
+    /// Outlook's OAuth client id: a secret.
+    pub client_id: Option<String>,
+}
+
+/// The token and the client id print as `***`.
+impl std::fmt::Debug for Mailbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mailbox")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("email", &self.email)
+            .field("domain", &self.domain)
+            .field("token", &"***")
+            .field("status", &self.status)
+            .field("created_at", &self.created_at)
+            .field("client_id", &self.client_id.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -254,7 +273,7 @@ pub struct ImportCounts {
 /// The settings `import_basics` takes from a Python database.
 const IMPORTED_SETTINGS: [&str; 3] = ["ele_api_url", "ele_api_key", "proxy_rest_seconds"];
 
-const MAILBOX: &str = "id, provider, email, domain, token, status, created_at";
+const MAILBOX: &str = "id, provider, email, domain, token, status, created_at, client_id";
 const MAIL: &str =
     "id, mailbox_id, ele_message_id, sender, subject, body, otp_extracted, received_at, html";
 const PROXY: &str = "id, host, port, username, password, active, status, last_used_at, refused_at, kind, signups_ok, signups_total";
@@ -271,6 +290,7 @@ fn mailbox(r: &Row) -> rusqlite::Result<Mailbox> {
         token: r.get(4)?,
         status: r.get(5)?,
         created_at: r.get(6)?,
+        client_id: r.get(7)?,
     })
 }
 
@@ -513,6 +533,15 @@ impl Db {
         self.c().execute(
             "UPDATE mailboxes SET status=?1 WHERE id=?2 AND status<>?1",
             params![status, id],
+        )?;
+        Ok(())
+    }
+
+    /// Outlook's rotated refresh token.
+    pub fn mailbox_set_token(&self, id: i64, token: &str) -> Result<()> {
+        self.c().execute(
+            "UPDATE mailboxes SET token=? WHERE id=?",
+            params![token, id],
         )?;
         Ok(())
     }
