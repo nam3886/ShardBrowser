@@ -1711,7 +1711,7 @@ mod tests {
         assert_eq!(db.import_outlook(&stored.join("\n")).unwrap().added, 3000);
         // 39,400 distinct (3,000 of them stored), 500 repeats, 100 bad lines.
         let mut lines: Vec<String> = (0..39_400).map(line).collect();
-        lines.extend((0..500).map(|i| line(39_000 + i)));
+        lines.extend((0..500).map(|i| line(38_000 + i)));
         lines.extend((0..100).map(|i| format!("bad line {i}")));
         assert_eq!(lines.len(), 40_000);
         let t = std::time::Instant::now();

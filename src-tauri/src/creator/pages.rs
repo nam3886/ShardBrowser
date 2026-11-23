@@ -714,7 +714,7 @@ mod tests {
             .route(
                 "/ms/v1.0/me/messages",
                 get(|| async {
-                    Json(json!({ "value": [{ "id": "M1", "subject": "Your verification code is: 482913",
+                    Json(json!({ "value": [{ "id": "M1", "subject": "Your verification code is: 482913.",
                         "receivedDateTime": "2026-11-17T10:00:00Z",
                         "from": { "emailAddress": { "address": "a@sender.example" } },
                         "body": { "contentType": "text", "content": "hello" } }] }))
