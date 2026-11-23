@@ -30,23 +30,36 @@ pub async fn ensure_profile(db: &Db, browser_id: i64) -> Result<String> {
         .browser_get(browser_id)?
         .ok_or_else(|| anyhow!("browser {browser_id} not found"))?;
     if let Some(id) = br.path.filter(|p| !p.is_empty()) {
-        if space::profile::load_raw(&id).is_ok() {
-            return Ok(id);
+        match space::profile::load_raw(&id) {
+            Ok(_) => return Ok(id),
+            // Gone only when Shard says so and its file is not here; any other
+            // failure is Shard's own error (retryable) and the link is kept.
+            Err(e) if gone(&e, &id) => {
+                db.browser_set_path(browser_id, None)?;
+                anyhow::bail!(PROFILE_GONE);
+            }
+            Err(e) => return Err(e),
         }
-        db.browser_set_path(browser_id, None)?;
-        anyhow::bail!(PROFILE_GONE);
     }
     let name = db
         .mailbox_get(br.mailbox_id)?
         .map(|m| m.email)
         .unwrap_or_default();
+    let id = make_profile(&name)?;
+    db.browser_set_path(browser_id, Some(&id))?;
+    // After the save: a refused save leaves no folder behind.
     if !space::folders::list()?.registry.iter().any(|f| f == FOLDER) {
         space::folders::add(Door("folder_add"), &Ticket::now(), FOLDER).await?;
     }
-    let id = make_profile(&name)?;
-    db.browser_set_path(browser_id, Some(&id))?;
     crate::notify_store_changed("profiles");
     Ok(id)
+}
+
+fn gone(e: &anyhow::Error, id: &str) -> bool {
+    matches!(
+        e.downcast_ref::<space::CmdError>(),
+        Some(space::CmdError::Missing(_))
+    ) && crate::store::profiles_dir().is_ok_and(|d| !d.join(format!("{id}.json")).exists())
 }
 
 /// `runner.rs` `make_profile` for a Windows fingerprint, with our language,
@@ -236,5 +249,24 @@ pub(crate) mod tests {
         assert_eq!(db.browser_get(br).unwrap().unwrap().path, None);
         let new = ensure_profile(&db, br).await.unwrap();
         assert_ne!(new, old);
+    }
+
+    #[tokio::test]
+    async fn another_load_error_keeps_the_link() {
+        let _serial = crate::migrate::serial();
+        let _root = shard_root("creator-unreadable");
+        let (db, _f) = temp_db();
+        let br = browser(&db);
+        let id = ensure_profile(&db, br).await.unwrap();
+        let file = crate::store::profiles_dir()
+            .unwrap()
+            .join(format!("{id}.json"));
+        std::fs::write(&file, b"not json").unwrap();
+        let err = ensure_profile(&db, br).await.unwrap_err();
+        assert_ne!(err.to_string(), PROFILE_GONE);
+        assert_eq!(
+            db.browser_get(br).unwrap().unwrap().path.as_deref(),
+            Some(id.as_str())
+        );
     }
 }
