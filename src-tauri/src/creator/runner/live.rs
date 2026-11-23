@@ -180,6 +180,8 @@ async fn live_outlook_test() {
 async fn dev_bridge() {
     use axum::http::header;
     use axum::routing::post;
+    /// The dev server's page (`dev:mock --port 4796`): the only origin answered.
+    const DEV_ORIGIN: &str = "http://127.0.0.1:4796";
     let _serial = crate::migrate::serial();
     let _root = crate::store::test_root("creator-bridge").with_config();
     eprintln!("DB {}", store::db_path().unwrap().display());
@@ -194,7 +196,7 @@ async fn dev_bridge() {
                 Some(Err(e)) => json!({ "err": format!("{e:#}") }),
                 None => json!({ "err": format!("unknown creator command: {cmd}") }),
             };
-            ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(r))
+            ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, DEV_ORIGIN)], axum::Json(r))
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:4795")

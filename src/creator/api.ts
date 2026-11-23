@@ -2,8 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 /** Box dev run only: `dev:mock` with our commands answered by a real backend
  *  over HTTP (`runner::live::dev_bridge`); our pages then behave as in the
- *  real build. Never set in a release build. */
-const BRIDGE: string | undefined = import.meta.env.VITE_CREATOR_BRIDGE;
+ *  real build. Dev server only: a build never reads it. */
+const BRIDGE: string | undefined = import.meta.env.DEV ? import.meta.env.VITE_CREATOR_BRIDGE : undefined;
 
 /** The browser mock build (`npm run dev:mock`), checked as upstream does. */
 export const MOCK = import.meta.env.VITE_MOCK === "1" && !BRIDGE;
