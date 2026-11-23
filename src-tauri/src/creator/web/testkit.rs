@@ -176,9 +176,13 @@ impl FixtureServer {
 
 /// A server whose `/flaky` answers garbage for `fail_for` after its first hit, then 200.
 /// By time, not by count: the browser's error page reloads itself now and then,
-/// so a count of requests is not a count of our tries. Returns the URL and the hits.
+/// so a count of requests is not a count of our tries. Returns the URL and the
+/// loads: a request counts only when it comes over 2 s after the last counted
+/// one (our tries are `GOTO_GAP` = 3 s apart; the browser's own re-sends and
+/// error-page reloads of one try come within that).
 pub async fn flaky_server(fail_for: Duration) -> (String, Arc<AtomicU32>) {
     let first = Arc::new(std::sync::OnceLock::<std::time::Instant>::new());
+    let counted = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let hits = Arc::new(AtomicU32::new(0));
@@ -190,6 +194,7 @@ pub async fn flaky_server(fail_for: Duration) -> (String, Arc<AtomicU32>) {
             };
             let seen = seen.clone();
             let first = first.clone();
+            let counted = counted.clone();
             tokio::spawn(async move {
                 let mut buf = [0u8; 2048];
                 let n = sock.read(&mut buf).await.unwrap_or(0);
@@ -199,7 +204,13 @@ pub async fn flaky_server(fail_for: Duration) -> (String, Arc<AtomicU32>) {
                         .await;
                     return;
                 }
-                seen.fetch_add(1, Ordering::SeqCst);
+                {
+                    let mut last = counted.lock().unwrap();
+                    if last.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
+                        *last = Some(std::time::Instant::now());
+                        seen.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
                 let since = *first.get_or_init(std::time::Instant::now);
                 if since.elapsed() < fail_for {
                     // Not HTTP: net::ERR_INVALID_HTTP_RESPONSE (a dropped socket is
