@@ -32,9 +32,14 @@ pub(super) fn loopback_http(
     }
 }
 
+/// Like Shard: once stopped (or closed by the person: `gone`), the browser
+/// reads as gone, so a failure text read after our own stop would be
+/// "Interrupted".
 struct TestBrowsers {
     ws: String,
     fail_open: AtomicBool,
+    gone: AtomicBool,
+    stopped: AtomicBool,
 }
 
 impl Browsers for TestBrowsers {
@@ -48,6 +53,7 @@ impl Browsers for TestBrowsers {
             if self.fail_open.load(SeqCst) {
                 bail!("ShardBrowser did not open");
             }
+            self.stopped.store(false, SeqCst);
             let session = Session::connect(&self.ws).await?;
             let page = session.page().await?;
             Ok(Opened {
@@ -59,10 +65,15 @@ impl Browsers for TestBrowsers {
     }
 
     fn failure_text(&self, _profile_id: &str, error: String) -> String {
-        error
+        if self.gone.load(SeqCst) || self.stopped.load(SeqCst) {
+            INTERRUPTED.into()
+        } else {
+            error
+        }
     }
 
     fn stop<'a>(&'a self, _profile_id: &'a str) -> BoxFuture<'a, ()> {
+        self.stopped.store(true, SeqCst);
         Box::pin(async {})
     }
 }
@@ -91,6 +102,8 @@ fn ctx(ele_base: &str, ws: String, urls: Urls) -> (Ctx<TestBrowsers>, TempFile) 
         browsers: TestBrowsers {
             ws,
             fail_open: AtomicBool::new(false),
+            gone: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
         },
         urls,
         tm: Timings::fast(),
@@ -220,7 +233,10 @@ async fn runner_failure_persists_code_and_screenshot() {
         ..Knobs::default()
     });
     let out = make_breeze(&e.cx, 1, "none", &RunState::default()).await;
+    // The failure text is read before our own stop (after it, it would be
+    // "Interrupted").
     assert_eq!(out, [failed(bb::CAPTCHA_UNSOLVED.into())]);
+    assert!(e.cx.browsers.stopped.load(SeqCst), "stopped at the end");
     let a = only_account(&e);
     assert_eq!(a.status, "failed");
     assert_eq!(a.error_code.as_deref(), Some("CAPTCHA_UNSOLVED"));
@@ -228,6 +244,21 @@ async fn runner_failure_persists_code_and_screenshot() {
     assert!(shot.ends_with(&format!("{}.png", a.id)));
     assert!(std::fs::metadata(&shot).unwrap().len() > 0);
     assert_no_secrets(&e, a.id);
+}
+
+#[tokio::test]
+async fn a_browser_closed_mid_run_is_interrupted_without_a_screenshot() {
+    let e = env!(Knobs {
+        turnstile: Turnstile::FailAlways,
+        ..Knobs::default()
+    });
+    e.cx.browsers.gone.store(true, SeqCst);
+    let out = make_breeze(&e.cx, 1, "none", &RunState::default()).await;
+    assert_eq!(out, [failed(INTERRUPTED.into())]);
+    let a = only_account(&e);
+    assert_eq!(a.error_code.as_deref(), Some("INTERRUPTED"));
+    assert_eq!(a.step_note.as_deref(), Some(INTERRUPTED));
+    assert_eq!(a.screenshot, None);
 }
 
 #[tokio::test]
@@ -330,8 +361,11 @@ async fn ele_down_fails_without_rows_and_no_proxy_fails_the_account() {
 
     let ele = fake_ele(200, vec![]).await;
     let (cx, _f) = ctx(&ele.site, String::new(), Urls::live());
-    let out = make_breeze(&cx, 1, "rotate", &RunState::default()).await;
+    // The first NO_PROXY ends the run: no more mailboxes for an empty pool.
+    let run = RunState::default();
+    let out = make_breeze(&cx, 3, "rotate", &run).await;
     assert_eq!(out, [failed(NO_PROXY.into())]);
+    assert_eq!(run.json()["done"], 1);
     let a = cx.db.accounts_recent(KEY, 10).unwrap().remove(0);
     assert_eq!(
         (a.status.as_str(), a.error_code.as_deref()),
@@ -438,4 +472,70 @@ async fn ele_inbox_errors_hold_no_url_token_or_key() {
             assert!(!e.contains(bad), "{bad} in {e}");
         }
     }
+}
+
+#[test]
+fn scrub_masks_quoted_forms_and_skips_short_values() {
+    let s = Scrub::default();
+    s.add("abc");
+    s.add("p@ss w/rd");
+    let p = Proxy {
+        id: 1,
+        host: "1.2.3.4".into(),
+        port: 8080,
+        username: Some("user".into()),
+        password: Some("p@ss w/rd".into()),
+        active: true,
+        status: "unknown".into(),
+        last_used_at: None,
+        refused_at: None,
+        kind: "static".into(),
+        signups_ok: 0,
+        signups_total: 0,
+    };
+    let url = proxy_url(&p);
+    assert!(url.contains("p%40ss"), "{url}");
+    assert_eq!(
+        s.clean(&format!("via {url}")),
+        "via http://user:***@1.2.3.4:8080/"
+    );
+    assert_eq!(s.clean("abc p@ss w/rd p%40ss+w%2Frd"), "abc *** ***");
+}
+
+#[test]
+fn accounts_limit_is_clamped_and_a_blank_ele_key_is_unchanged() {
+    let (db, _f) = temp_db();
+    for i in 0..3 {
+        let mb = db
+            .mailbox_create("ele", &format!("u{i}@a.test"), "a.test", "t")
+            .unwrap();
+        db.account_create(mb.id, KEY, "email", None).unwrap();
+    }
+    let n = |limit: Value| {
+        let rows = accounts(&db, &json!({ "limit": limit })).unwrap();
+        rows.as_array().unwrap().len()
+    };
+    assert_eq!((n(json!(0)), n(json!(-5)), n(json!(2))), (1, 1, 2));
+    assert_eq!(n(json!(1_000_000)), 3);
+
+    let set = |k: &str, v: &str| settings_set(&db, &json!({ "key": k, "value": v }));
+    set("ele_api_key", " KEY-1 ").unwrap();
+    set("ele_api_key", "   ").unwrap();
+    set("ele_api_key", "").unwrap();
+    assert_eq!(
+        db.settings_get("ele_api_key").unwrap().as_deref(),
+        Some("KEY-1")
+    );
+    set("ele_api_url", " https://ele.test/api ").unwrap();
+    assert_eq!(
+        db.settings_get("ele_api_url").unwrap().as_deref(),
+        Some("https://ele.test/api")
+    );
+    assert!(set("max_chrome", "9").is_err());
+    let keys = json!({ "keys": ["ele_api_key", "ele_api_url"] });
+    let got = settings_get(&db, &keys).unwrap();
+    assert_eq!(
+        got,
+        json!({ "ele_api_key": true, "ele_api_url": "https://ele.test/api" })
+    );
 }

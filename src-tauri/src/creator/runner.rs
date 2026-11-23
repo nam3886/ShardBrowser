@@ -117,9 +117,25 @@ impl Scrub {
         s
     }
 
+    /// Under 4 characters is not masked (it would garble every message), as
+    /// in Python. Its URL-encoded forms are too: a proxy URL carries the
+    /// password quoted (`proxy_url`), a form body with `+` for spaces.
     fn add(&self, v: &str) {
-        if !v.is_empty() {
-            self.0.lock().unwrap().push(v.to_string());
+        if v.chars().count() < 4 {
+            return;
+        }
+        let quoted = url::form_urlencoded::byte_serialize(v.as_bytes());
+        let mut forms = vec![v.to_string(), quoted.collect()];
+        if let Ok(mut u) = url::Url::parse("http://h") {
+            if u.set_password(Some(v)).is_ok() {
+                forms.extend(u.password().map(str::to_string));
+            }
+        }
+        let mut all = self.0.lock().unwrap();
+        for f in forms {
+            if !all.contains(&f) {
+                all.push(f);
+            }
         }
     }
 
@@ -235,6 +251,9 @@ fn err_line(e: &anyhow::Error, scrub: &Scrub) -> String {
 
 /// Run account `id` (its row, mailbox and browser exist) and persist the
 /// result on its row.
+// ponytail: no watcher for a browser Shard closes mid-run: the flow ends on
+// its own errors, then `failure_text` reads "Interrupted". Add one with the
+// queue (M5). Same for the startup sweep of rows a crash left "running".
 pub async fn run_account<B: Browsers>(cx: &Ctx<B>, id: i64) -> Outcome {
     let scrub = Scrub::of(&cx.db);
     let (status, error, shot) = match attempt(cx, id, &scrub).await {
@@ -420,8 +439,13 @@ pub async fn make_breeze<B: Browsers>(
         if run.stop.load(SeqCst) {
             break;
         }
-        out.push(new_account(cx, job, proxy_mode).await);
+        let o = new_account(cx, job, proxy_mode).await;
+        let no_proxy = o.error.as_deref() == Some(NO_PROXY);
+        out.push(o);
         run.done.fetch_add(1, SeqCst);
+        if no_proxy {
+            break; // an empty pool: more accounts would only burn Ele mailboxes
+        }
     }
     out
 }
@@ -456,6 +480,8 @@ async fn new_account<B: Browsers>(cx: &Ctx<B>, job: i64, mode: &str) -> Outcome 
         Err(e) => return failed(err_line(&e, &scrub)),
     };
     if let Err(e) = picked {
+        // ponytail: a rerun of this account finds its browser without a proxy
+        // and fails "proxy deleted" (PROXY_UNUSABLE), not NO_PROXY; reruns are M5.
         let error = err_line(&e, &scrub);
         finish(db, id, "failed", Some(error.clone()), None);
         return failed(error);
@@ -528,8 +554,8 @@ fn arg<'a>(args: &'a Value, k: &str) -> Result<&'a str> {
 /// Our commands (`creator_call`); None for a command that is not ours here.
 pub async fn call(cmd: &str, args: &Value) -> Option<Result<Value>> {
     Some(match cmd {
-        "settings_get" => settings_get(args),
-        "settings_set" => settings_set(args),
+        "settings_get" => db().and_then(|db| settings_get(&db, args)),
+        "settings_set" => db().and_then(|db| settings_set(&db, args)),
         "import_basics" => (|| {
             let n = store::import_basics(&*db()?, std::path::Path::new(arg(args, "path")?))?;
             Ok(
@@ -546,11 +572,7 @@ pub async fn call(cmd: &str, args: &Value) -> Option<Result<Value>> {
             Ok(Value::Null)
         }
         "run_state" => Ok(RUN.json()),
-        "accounts" => (|| {
-            let platform = args["platform"].as_str().unwrap_or(KEY);
-            let limit = args["limit"].as_i64().unwrap_or(100);
-            Ok(Value::from(db()?.account_rows(platform, limit)?))
-        })(),
+        "accounts" => db().and_then(|db| accounts(&db, args)),
         "events" => (|| {
             let id = args["account_id"]
                 .as_i64()
@@ -569,9 +591,15 @@ pub async fn call(cmd: &str, args: &Value) -> Option<Result<Value>> {
     })
 }
 
+/// The Accounts list: `platform` (Breeze Blue by default), `limit` 1..1000 (100).
+fn accounts(db: &Db, args: &Value) -> Result<Value> {
+    let platform = args["platform"].as_str().unwrap_or(KEY);
+    let limit = args["limit"].as_i64().unwrap_or(100).clamp(1, 1000);
+    Ok(Value::from(db.account_rows(platform, limit)?))
+}
+
 /// `{key: value}` for `keys`; the Ele key only says whether it is set.
-fn settings_get(args: &Value) -> Result<Value> {
-    let db = db()?;
+fn settings_get(db: &Db, args: &Value) -> Result<Value> {
     let mut out = serde_json::Map::new();
     for k in args["keys"].as_array().into_iter().flatten() {
         let k = k.as_str().unwrap_or("");
@@ -591,14 +619,14 @@ fn settings_get(args: &Value) -> Result<Value> {
     Ok(Value::Object(out))
 }
 
-/// One of `SETTINGS`; an empty Ele key means "unchanged".
-fn settings_set(args: &Value) -> Result<Value> {
-    let (k, v) = (arg(args, "key")?, arg(args, "value")?);
+/// One of `SETTINGS`, trimmed; an empty (or blank) Ele key means "unchanged".
+fn settings_set(db: &Db, args: &Value) -> Result<Value> {
+    let (k, v) = (arg(args, "key")?, arg(args, "value")?.trim());
     if !SETTINGS.contains(&k) {
         bail!("unknown setting: {k}");
     }
     if !(k == SECRET_SETTING && v.is_empty()) {
-        db()?.settings_set(k, v.trim())?;
+        db.settings_set(k, v)?;
     }
     Ok(Value::Null)
 }
