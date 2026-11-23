@@ -15,7 +15,7 @@ Code is edited on the Mac. Anything that needs Windows (build, full gates, live 
    ```
 
 3. Run PowerShell scripts with `-ExecutionPolicy Bypass` (the default policy blocks them).
-4. Run the gates from `working-process.md` §7 (`npm ci; npm run build:ui-kit` once, `npm run check`, then `cargo test --locked` in `src-tauri`).
+4. Run the full gate list from `working-process.md` §7. The Mac has no toolchain, so the box is the gate: a branch must show no new failures against the Windows baseline below (§7's "0 failed / clean" is the target; the baseline is the known exception).
 
 ## Box setup facts
 
@@ -29,7 +29,7 @@ Code is edited on the Mac. Anything that needs Windows (build, full gates, live 
 A branch passes what `main` passes. On `main`:
 
 - `cargo test`: five `reset::tests::*` (they assume a macOS home layout) and one `extensions::updates…a_silent_store_times_out…` fail. Known flaky upstream tests under load: `space::sync…`, `space::cache…`, `gpu_caps…`, `extensions::usage::a_launch_and_a_swap_never_overlap`; rerun them alone before blaming a branch.
-- `npm run check:classes` fails on upstream files: 10 token breaks and 3 stale allowlist entries.
+- `npm run check:classes` has known failures in upstream files.
 
 ## Live runs
 

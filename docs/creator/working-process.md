@@ -81,11 +81,11 @@ For a new project:
 
 ## 7. This project (Ghidorah Creator, ShardBrowser fork)
 
-- **Gates:**
+- **Gates:** the Mac has no toolchain, so the Windows test box is the gate (`box-workflow.md`): the pass bar is no new failures versus `main`'s baseline on the box (known baseline failures are listed there), not a literal 0 failed.
   - Node 22 or newer (`test:unit` runs `.ts` files straight through `node --test`); `cmake` for BoringSSL;
   - once per checkout: `npm ci && npm run build:ui-kit`;
   - `npm run check` (tsc, eslint, check:i18n, check:errors, check:classes, check:kit, test:scripts, test:unit, contrast, colors);
-  - `cargo test --manifest-path src-tauri/Cargo.toml creator::` (ours, fast); the FULL upstream suite `cargo test --locked` (in `src-tauri`, 0 failed, not just `creator::`) before every merge, since upstream guard tests scan our files too;
+  - `cargo test --manifest-path src-tauri/Cargo.toml creator::` (ours, fast); the FULL upstream suite `cargo test --locked` (in `src-tauri`, not just `creator::`) before every merge, since upstream guard tests scan our files too;
   - `rustfmt --edition 2021 --check $(git ls-files 'src-tauri/src/creator/**.rs')`;
   - `node --test scripts/creator/*.test.mjs` and `node scripts/creator/check-seams.mjs` (every touched upstream file is a listed seam with its marker count).
   - Shard's own e2e on the pages our seams touch, in a lane (never ports 1420 or 4173): `E2E_PORT=4793 npx playwright test e2e/proxies.spec.ts e2e/no-dot-status.spec.ts e2e/palette.spec.ts e2e/window.spec.ts e2e/settings*.spec.ts e2e/unsaved-guard.spec.ts --project=dev`; the branch passes what `main` passes (run `main` first for the baseline).
