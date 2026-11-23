@@ -185,13 +185,14 @@ impl<'a> TtsRun<'a> {
     }
 
     /// Fill every (locator, value), again until all values stick (React can drop
-    /// an early fill), at most 5 rounds. A field that already holds its value is
-    /// left alone (Playwright's fill was instant; typing it again costs seconds).
+    /// an early fill), at most 5 rounds. The first round types every field, even
+    /// one that already shows its value (the page's own state may not hold it);
+    /// a later round retypes only the fields that did not stick.
     pub async fn fill(&self, pairs: &[(&Locator, &str)], poll: Duration) -> bool {
-        for _ in 0..5 {
+        for round in 0..5 {
             let mut typed = true;
             for (loc, value) in pairs {
-                if self.value_of(loc).await == *value {
+                if round > 0 && self.value_of(loc).await == *value {
                     continue;
                 }
                 if loc.fill(value, FILL_TIMEOUT).await.is_err() {
