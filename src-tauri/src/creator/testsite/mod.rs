@@ -452,9 +452,11 @@ async fn ms_token(Ax(st): Ax<Shared>) -> Response {
             st.seen.outlook_issued.push(rt.clone());
             Json(json!({ "access_token": "AT-site", "refresh_token": rt })).into_response()
         }
-        OutlookToken::InvalidGrant => {
-            (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_grant" }))).into_response()
-        }
+        OutlookToken::InvalidGrant => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_grant" })),
+        )
+            .into_response(),
         OutlookToken::Http(code) => (StatusCode::from_u16(code).unwrap(), "{}").into_response(),
     }
 }

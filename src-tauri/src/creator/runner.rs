@@ -686,6 +686,6 @@ pub fn start(count: u32, proxy_mode: String, route: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
-#[cfg(test)]
 mod live;
+#[cfg(test)]
+pub(crate) mod tests;

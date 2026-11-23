@@ -596,7 +596,9 @@ impl Db {
         let mut c = self.c();
         // An error rolls the transaction back, the temp table with it.
         let tx = c.transaction()?;
-        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS _imp (email TEXT); DELETE FROM temp._imp;")?;
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS _imp (email TEXT); DELETE FROM temp._imp;",
+        )?;
         {
             let mut ins = tx.prepare("INSERT INTO temp._imp VALUES (?)")?;
             for (_, l) in &valid {
@@ -1383,20 +1385,32 @@ mod tests {
 
     #[test]
     fn parse_valid() {
-        let (valid, invalid) =
-            parse_outlook("a@outlook.example|pw|M.Ctok|cid-uuid|rec@x.example");
+        let (valid, invalid) = parse_outlook("a@outlook.example|pw|M.Ctok|cid-uuid|rec@x.example");
         assert!(invalid.is_empty());
         assert_eq!(valid.len(), 1);
         let (n, l) = &valid[0];
         assert_eq!(
-            (*n, l.email.as_str(), l.token.as_str(), l.client_id.as_str(), l.domain.as_str()),
-            (1, "a@outlook.example", "M.Ctok", "cid-uuid", "outlook.example")
+            (
+                *n,
+                l.email.as_str(),
+                l.token.as_str(),
+                l.client_id.as_str(),
+                l.domain.as_str()
+            ),
+            (
+                1,
+                "a@outlook.example",
+                "M.Ctok",
+                "cid-uuid",
+                "outlook.example"
+            )
         );
     }
 
     #[test]
     fn parse_invalid() {
-        let text = "a|b|c\n\nnoat|pw|t|c|r\na@x.example|pw||c|r\na@x.example|pw|t||r\n b@ |pw|t|c|r";
+        let text =
+            "a|b|c\n\nnoat|pw|t|c|r\na@x.example|pw||c|r\na@x.example|pw|t||r\n b@ |pw|t|c|r";
         let (valid, invalid) = parse_outlook(text);
         assert!(valid.is_empty());
         assert_eq!(
@@ -1492,6 +1506,9 @@ mod tests {
             }
         }
         assert!(all.contains("T1"), "{all}");
-        assert!(!all.contains("PWSECRET9") && !all.contains("RECSECRET9"), "{all}");
+        assert!(
+            !all.contains("PWSECRET9") && !all.contains("RECSECRET9"),
+            "{all}"
+        );
     }
 }

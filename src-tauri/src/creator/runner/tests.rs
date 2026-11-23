@@ -553,7 +553,11 @@ async fn the_job_is_seen_from_the_start_and_its_accounts_join_it() {
 fn outlook_mailbox(db: &Db, n: u32) -> i64 {
     let line = format!("o{n}@outlook.test|pw|{OUTLOOK_RT}|{OUTLOOK_CID}|r");
     assert_eq!(db.import_outlook(&line).unwrap().added, 1);
-    db.breeze_free_outlook(1000).unwrap().into_iter().max().unwrap()
+    db.breeze_free_outlook(1000)
+        .unwrap()
+        .into_iter()
+        .max()
+        .unwrap()
 }
 
 /// An account row (no run yet) on a new Outlook mailbox with its browser.
@@ -652,7 +656,8 @@ async fn outlook_make_takes_free_mailboxes_oldest_first_and_skips_taken() {
     let (cx, _f, _site) = site_ctx(Knobs::default()).await;
     let db = &*cx.db;
     let ids: Vec<i64> = (1..=10).map(|n| outlook_mailbox(db, n)).collect();
-    db.mailbox_create("ele", "e@ele.test", "ele.test", "tok").unwrap();
+    db.mailbox_create("ele", "e@ele.test", "ele.test", "tok")
+        .unwrap();
     let account = |mb: i64, platform: &str, status: &str, code: Option<&str>| {
         let id = db.account_create(mb, platform, "email", None).unwrap();
         let p = AccountPatch {
@@ -709,7 +714,10 @@ async fn outlook_make_takes_free_mailboxes_oldest_first_and_skips_taken() {
 fn outlook_route_refuses_more_than_free() {
     let (db, _f) = temp_db();
     outlook_mailbox(&db, 1);
-    assert_eq!(check_start(&db, 1, "none", "email:outlook").unwrap(), "outlook");
+    assert_eq!(
+        check_start(&db, 1, "none", "email:outlook").unwrap(),
+        "outlook"
+    );
     assert_eq!(
         check_start(&db, 2, "none", "email:outlook")
             .unwrap_err()
@@ -718,7 +726,9 @@ fn outlook_route_refuses_more_than_free() {
     );
     assert_eq!(check_start(&db, 2, "none", "email:ele").unwrap(), "ele");
     assert_eq!(
-        check_start(&db, 1, "none", "google").unwrap_err().to_string(),
+        check_start(&db, 1, "none", "google")
+            .unwrap_err()
+            .to_string(),
         "unknown route: google"
     );
 }

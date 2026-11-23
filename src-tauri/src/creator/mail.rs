@@ -440,7 +440,13 @@ impl OutlookClient {
                     .map_err(outlook_store_err)?;
             }
         }
-        let r = match self.http.get(&self.urls.graph).bearer_auth(access).send().await {
+        let r = match self
+            .http
+            .get(&self.urls.graph)
+            .bearer_auth(access)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => return failed(class(&e)),
         };
@@ -491,7 +497,11 @@ impl OutlookClient {
                     .then(|| content.to_string()),
                 received_at: it["receivedDateTime"].as_str().map(str::to_string),
             };
-            new.push(self.db.mail_create(mb.id, &row).map_err(outlook_store_err)?);
+            new.push(
+                self.db
+                    .mail_create(mb.id, &row)
+                    .map_err(outlook_store_err)?,
+            );
         }
         Ok(new)
     }
@@ -572,7 +582,9 @@ fn with_digit(r: &Regex, t: &str) -> Option<String> {
 static OTP: LazyLock<[Regex; 10]> = LazyLock::new(|| {
     [
         re(r"(?i)(?:one-time\s*)?verification\s*code\s*is:?\s*([A-Za-z0-9]{6})\b"),
-        re(r"(?i)(?:verification\s*code|verify|your\s*code|enter\s*code|security\s*code)[^\w]{1,40}([A-Za-z0-9]{6})\b"),
+        re(
+            r"(?i)(?:verification\s*code|verify|your\s*code|enter\s*code|security\s*code)[^\w]{1,40}([A-Za-z0-9]{6})\b",
+        ),
         re(r"(?i)(?:confirmation|verification|security)\s*code\s*is:?\s*(\d{5,8})\b"),
         re(r"(?i)G-(\d{6})\b"),
         re(r"(?i)(?:code|verify|verification)[^\d]{1,25}(\d{3})\s+(\d{3})\b"),
@@ -1049,7 +1061,10 @@ mod tests {
                 ("2".to_string(), Some("stale".to_string()))
             ])
         );
-        assert_eq!(e.ele.grace.cutoff_of(mb.id), parse_iso("2026-10-25T10:00:00"));
+        assert_eq!(
+            e.ele.grace.cutoff_of(mb.id),
+            parse_iso("2026-10-25T10:00:00")
+        );
 
         // An inbox that cannot be read fails a reuse at once.
         e.fake.lock().unwrap().inbox_status = 404;
@@ -1088,9 +1103,16 @@ mod tests {
         e.ele.reuse_mailbox(&mb).await.unwrap();
         // Stored by the reuse: not new, never used.
         assert_eq!(
-            wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::ZERO, &pick, FAST, None)
-                .await
-                .unwrap(),
+            wait_for_new_mail(
+                MailClient::Ele(&e.ele),
+                &mb,
+                Duration::ZERO,
+                &pick,
+                FAST,
+                None
+            )
+            .await
+            .unwrap(),
             None
         );
         // An old mail that came in late.
@@ -1102,9 +1124,16 @@ mod tests {
             ]),
         );
         assert_eq!(
-            wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::ZERO, &pick, FAST, None)
-                .await
-                .unwrap(),
+            wait_for_new_mail(
+                MailClient::Ele(&e.ele),
+                &mb,
+                Duration::ZERO,
+                &pick,
+                FAST,
+                None
+            )
+            .await
+            .unwrap(),
             None
         );
         // Fresh, whatever this machine's clock says; and an undated one is never dropped.
@@ -1113,19 +1142,33 @@ mod tests {
             serde_json::json!([link(3, Some("2026-10-25T10:01:00"))]),
         );
         assert_eq!(
-            wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::ZERO, &pick, FAST, None)
-                .await
-                .unwrap()
-                .as_deref(),
+            wait_for_new_mail(
+                MailClient::Ele(&e.ele),
+                &mb,
+                Duration::ZERO,
+                &pick,
+                FAST,
+                None
+            )
+            .await
+            .unwrap()
+            .as_deref(),
             Some("https://b.ai/verify?t=3")
         );
         set_emails(
             &e,
             serde_json::json!([link(4, None), link(5, Some("2026-10-25"))]),
         );
-        let got = wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::ZERO, &pick, FAST, None)
-            .await
-            .unwrap();
+        let got = wait_for_new_mail(
+            MailClient::Ele(&e.ele),
+            &mb,
+            Duration::ZERO,
+            &pick,
+            FAST,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             matches!(
                 got.as_deref(),
@@ -1161,9 +1204,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             fake.lock().unwrap().emails = vec![link(1, None)];
         });
-        let got = wait_for_new_mail(MailClient::Ele(&e.ele), &mb, Duration::from_secs(5), &pick, FAST, None)
-            .await
-            .unwrap();
+        let got = wait_for_new_mail(
+            MailClient::Ele(&e.ele),
+            &mb,
+            Duration::from_secs(5),
+            &pick,
+            FAST,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(got.as_deref(), Some("https://b.ai/verify?t=1"));
     }
 
@@ -1329,9 +1379,9 @@ mod tests {
         }));
         let srv = outlook_server(fake.clone()).await;
         let cl = OutlookClient::new(db.clone(), OutlookUrls::on(&srv.site)).unwrap();
-        let mb =
-            db.mailbox_create("outlook", "a@outlook.example", "outlook.example", "OLD")
-                .unwrap();
+        let mb = db
+            .mailbox_create("outlook", "a@outlook.example", "outlook.example", "OLD")
+            .unwrap();
         db.exec_for_test(&format!(
             "UPDATE mailboxes SET client_id='CID' WHERE id={}",
             mb.id
@@ -1380,7 +1430,10 @@ mod tests {
                 Some("2026-11-17T10:00:00Z")
             )
         );
-        assert_eq!(extract_otp(m.subject.as_deref().unwrap()).as_deref(), Some("ABC123"));
+        assert_eq!(
+            extract_otp(m.subject.as_deref().unwrap()).as_deref(),
+            Some("ABC123")
+        );
     }
 
     #[tokio::test]
@@ -1567,9 +1620,15 @@ mod tests {
         e.cl.grace.unavailable_after = Duration::ZERO;
         let mut errs = Vec::new();
         for (code, body) in [
-            (500, serde_json::json!({ "error": "x", "refresh_token": "NEW" })),
+            (
+                500,
+                serde_json::json!({ "error": "x", "refresh_token": "NEW" }),
+            ),
             (429, serde_json::json!({})),
-            (400, serde_json::json!({ "error": "temporarily_unavailable" })),
+            (
+                400,
+                serde_json::json!({ "error": "temporarily_unavailable" }),
+            ),
             (200, serde_json::json!({ "refresh_token": "NEW" })),
         ] {
             e.token(code, body);

@@ -400,9 +400,16 @@ mod tests {
         assert_eq!(breeze_card(&db).unwrap()["free"], 2);
         assert_eq!(keys(&breeze_card(&db).unwrap()), fields("PlatformCard"));
         // No Ele key: blocks the Ele route only.
-        let blocks = |route: &str| make_check(&db, &json!({ "route": route, "proxy": "none" })).unwrap();
-        assert!(blocks("email:ele").as_array().unwrap().contains(&json!("NO_ELE_KEY")));
-        assert!(!blocks("email:outlook").as_array().unwrap().contains(&json!("NO_ELE_KEY")));
+        let blocks =
+            |route: &str| make_check(&db, &json!({ "route": route, "proxy": "none" })).unwrap();
+        assert!(blocks("email:ele")
+            .as_array()
+            .unwrap()
+            .contains(&json!("NO_ELE_KEY")));
+        assert!(!blocks("email:outlook")
+            .as_array()
+            .unwrap()
+            .contains(&json!("NO_ELE_KEY")));
     }
 
     #[test]
