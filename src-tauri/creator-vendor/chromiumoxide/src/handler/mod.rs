@@ -21,7 +21,6 @@ use crate::cmd::{to_command_response, CommandMessage};
 use crate::conn::Connection;
 use crate::error::{CdpError, Result};
 use crate::handler::browser::BrowserContext;
-use crate::handler::frame::FrameNavigationRequest;
 use crate::handler::frame::{NavigationError, NavigationId, NavigationOk};
 use crate::handler::job::PeriodicJob;
 use crate::handler::session::Session;
@@ -75,8 +74,6 @@ pub struct Handler {
     conn: Connection<CdpEventMessage>,
     /// Evicts timed out requests periodically
     evict_command_timeout: PeriodicJob,
-    /// The internal identifier for a specific navigation
-    next_navigation_id: usize,
     /// How this handler will configure targets etc,
     config: HandlerConfig,
     /// All registered event subscriptions
@@ -117,7 +114,6 @@ impl Handler {
             sessions: Default::default(),
             conn,
             evict_command_timeout: PeriodicJob::new(config.request_timeout),
-            next_navigation_id: 0,
             config,
             event_listeners: Default::default(),
             closing: false,
@@ -333,29 +329,6 @@ impl Handler {
 
         self.pending_commands
             .insert(call_id, (PendingRequest::CloseBrowser(tx), method, now));
-    }
-
-    /// Process a message received by the target's page via channel
-    fn on_target_message(&mut self, target: &mut Target, msg: CommandMessage, now: Instant) {
-        // if let some
-        if msg.is_navigation() {
-            let (req, tx) = msg.split();
-            let id = self.next_navigation_id();
-            target.goto(FrameNavigationRequest::new(id, req));
-            self.navigations.insert(
-                id,
-                NavigationRequest::Navigate(NavigationInProgress::new(tx)),
-            );
-        } else {
-            let _ = self.submit_external_command(msg, now);
-        }
-    }
-
-    /// An identifier for queued `NavigationRequest`s.
-    fn next_navigation_id(&mut self) -> NavigationId {
-        let id = NavigationId(self.next_navigation_id);
-        self.next_navigation_id = self.next_navigation_id.wrapping_add(1);
-        id
     }
 
     /// Create a new page and send it to the receiver when ready
@@ -589,7 +562,15 @@ impl Stream for Handler {
                                 );
                             }
                             TargetEvent::Command(msg) => {
-                                pin.on_target_message(&mut target, msg, now);
+                                // creator patch: Page.navigate is a plain command too,
+                                // sent at once and answered with Chrome's own answer
+                                // (loaderId or errorText), as Playwright does; the caller
+                                // waits for the lifecycle event it needs. Stock 0.7 held
+                                // it behind the previous navigation's `load` and answered
+                                // from a watcher keeping the loader of when it was
+                                // queued: a client redirect meanwhile answered it, and
+                                // the held navigate reloaded the page later.
+                                let _ = pin.submit_external_command(msg, now);
                             }
                             TargetEvent::NavigationRequest(id, req) => {
                                 pin.submit_navigation(id, req, now);
@@ -687,14 +668,6 @@ pub struct NavigationInProgress<T> {
 }
 
 impl<T> NavigationInProgress<T> {
-    fn new(tx: OneshotSender<T>) -> Self {
-        Self {
-            navigated: false,
-            response: None,
-            tx,
-        }
-    }
-
     /// The response to the cdp request has arrived
     fn set_response(&mut self, resp: Response) {
         self.response = Some(resp);
