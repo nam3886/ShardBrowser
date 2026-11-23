@@ -95,6 +95,8 @@ pub fn pick_proxy(db: &Db, mode: &str, kind: &str) -> Result<Option<Proxy>> {
         };
         return Err(NoHealthyProxy(format!("no usable {kind}proxy available")).into());
     };
+    // ponytail: pick and touch are two statements; make them one transaction
+    // when runs go in parallel (M5), or two runs can take the same proxy.
     db.proxy_touch(best.id)?;
     Ok(db.proxy_get(best.id)?)
 }
