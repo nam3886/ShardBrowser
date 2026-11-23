@@ -35,9 +35,10 @@ const PAGE_BY_ID: Record<CreatorSection, PageDef> = {
   "c-proxies": def("creator.nav.proxies", "proxies", RouteIcon, () => import("./pages/ProxiesPage").then((m) => m.ProxiesPage)),
   "c-platforms": def("creator.nav.platforms", "platforms", icon(GridViewIcon), () => import("./pages/PlatformsPage").then((m) => m.PlatformsPage)),
 };
-// Only Accounts runs on real data (M2, Breeze Blue); the other pages are
+// Accounts (M2) and Emails (M3) run on real data; the other pages are
 // mock-only until M7 wires them, so a real build leaves them out.
-const PAGES = CREATOR_SECTIONS.filter((id) => MOCK || id === "c-accounts").map((id) => ({ id, ...PAGE_BY_ID[id] }));
+const REAL: CreatorSection[] = ["c-accounts", "c-emails"];
+const PAGES = CREATOR_SECTIONS.filter((id) => MOCK || REAL.includes(id)).map((id) => ({ id, ...PAGE_BY_ID[id] }));
 
 /** Our pages as Shard's palette "Go to" commands (appCommands' nav.*), after its own (seam).
  *  `go` is Shard's own (keyboard to the page); "creator" and the English names find them in every language. */

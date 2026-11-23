@@ -8,7 +8,7 @@ import type { ListColumnDef } from "../../shared/ui/listHeader";
 import { fmtTs } from "../../shared/lib/utils";
 import { toast } from "../../shared/model/toast";
 import { confirmModal } from "../../shared/model/confirm";
-import { call } from "../api";
+import { call, MOCK } from "../api";
 import { runPool } from "../pool";
 import { ct, useCt } from "../i18n";
 import type { EmailList, EmailRow, PlatformCard } from "../types";
@@ -41,9 +41,10 @@ const COLUMNS: readonly ListColumnDef<Col, EmailRow>[] = [
 
 /** Test mailboxes as Shard tests proxies (useProxy.bulkTest): a "Testing"
  *  toast, the same continuous pool of 5, then one summary. */
-const testEmails = async (ids: string[]) => {
+const testEmails = async (ids: (string | number)[]) => {
+  if (ids.length === 0) return;
   toast.info(ids.length === 1 ? ct("creator.emails.testingOne") : ct("creator.emails.testing", { n: ids.length }));
-  const got = await runPool(ids, 5, (id) => call<"active" | "gone" | "failed">("test_mailbox", { id }).catch(() => "failed" as const));
+  const got = await runPool(ids, 5, (id) => call<"active" | "gone" | "failed">("test_mailbox", { id: Number(id) }).catch(() => "failed" as const));
   const r = { n: ids.length, active: got.filter((x) => x === "active").length, gone: got.filter((x) => x === "gone").length, failed: got.filter((x) => x === "failed").length };
   (r.active === r.n ? toast.ok : toast.info)(ct("creator.emails.testedSummary", r));
 };
@@ -74,6 +75,10 @@ export function EmailsPage() {
   const filtered = !!(kind || state || freeFor);
   const nothing = list.status === "ready" && data?.counts.all === 0 && !q.trim() && !filtered;
   const n = selected.size;
+  // "Test all mailboxes": every id under the current filters, not only the loaded rows.
+  const testAll = () => void call<number[]>("email_ids", { kind, status: state, free_for: freeFor, q })
+    .then((ids) => testEmails(ids), (e) => toast.fail({ title: ct("creator.emails.checkAll"), detail: e }))
+    .then(list.reload);
   const pick = (set: (v: string | null) => void) => (v: string | null) => { set(v); setSelected(new Set()); };
   const fields: FilterField[] = [
     { id: "type", label: ct("creator.col.type"), current: kind, set: pick(setKind), values: (["outlook", "ele"] as const).map((k) => ({ value: k, label: ct(`creator.mailbox.${k}`), count: data?.counts[k], icon: <PlatformMark k={k} /> })) },
@@ -103,9 +108,10 @@ export function EmailsPage() {
                 ] }}
               />
             )}
+            {/* Export and Delete come with M7: the real build leaves them out (D-M3-1). */}
             <HeaderMenu items={[
-              { label: ct("creator.emails.checkAll"), icon: <RefreshIcon className="size-3.5" />, onSelect: () => void testEmails(list.items.map((m) => String(m.id))) },
-              { label: ct("creator.emails.exportAll"), icon: <DownloadIcon className="size-3.5" />, onSelect: () => {} },
+              { label: ct("creator.emails.checkAll"), icon: <RefreshIcon className="size-3.5" />, onSelect: testAll },
+              ...(MOCK ? [{ label: ct("creator.emails.exportAll"), icon: <DownloadIcon className="size-3.5" />, onSelect: () => {} }] : []),
             ]} />
             <Button variant="primary" mode="filled" size="xsmall" leftIcon={<AddIcon className="size-3.5" />} onClick={() => setAdding(true)}>
               {ct("creator.addEmails.open")}
@@ -149,17 +155,18 @@ export function EmailsPage() {
               n={n}
               onClear={() => setSelected(new Set())}
               actions={[
-                { id: "check", label: ct("creator.emails.check"), icon: <RefreshIcon className="size-3.5" />, onClick: () => void testEmails([...selected]) },
-                { id: "export", label: ct("creator.action.export"), icon: <DownloadIcon className="size-3.5" />, onClick: () => {} },
+                { id: "check", label: ct("creator.emails.check"), icon: <RefreshIcon className="size-3.5" />, onClick: () => void testEmails([...selected]).then(list.reload) },
+                ...(MOCK ? [{ id: "export", label: ct("creator.action.export"), icon: <DownloadIcon className="size-3.5" />, onClick: () => {} }] : []),
               ]}
-              more={[{ label: ct("creator.action.delete"), icon: <DeleteIcon className="size-3.5" />, danger: true, onSelect: () => void confirmDeleteEmails(n) }]}
+              more={MOCK ? [{ label: ct("creator.action.delete"), icon: <DeleteIcon className="size-3.5" />, danger: true, onSelect: () => void confirmDeleteEmails(n) }] : []}
             />
           )}
           peek={<EmailPeek email={list.items.find((m) => m.id === openId) ?? null} onClose={() => setOpenId(null)} />}
         />
       </PageBody>
-      <AddEmailsDialog open={adding} onClose={() => setAdding(false)} />
-      <MakeDialog open={!!makeFor} platform={makeFor ?? undefined} count={Math.min(freeCount, 500)} onClose={() => setMakeFor(null)} />
+      <AddEmailsDialog open={adding} onClose={() => setAdding(false)} onAdded={list.reload} />
+      {/* Free emails are Outlook ones: Make starts on that route. */}
+      <MakeDialog open={!!makeFor} platform={makeFor ?? undefined} route="email:outlook" count={Math.min(freeCount, 500)} onClose={() => setMakeFor(null)} onStarted={list.reload} />
     </>
   );
 }
