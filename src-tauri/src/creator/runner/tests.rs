@@ -7,6 +7,8 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use serde_json::Value;
+
 use super::*;
 use crate::creator::store::MailMessage;
 use crate::creator::store::{temp_db, TempFile};

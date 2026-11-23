@@ -744,7 +744,10 @@ impl Db {
         }
         let q = f.q.trim();
         if !q.is_empty() {
-            let esc = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            let esc = q
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
             wh.push("m.email LIKE ? ESCAPE '\\'".into());
             args.push(V::Text(format!("%{esc}%")));
         }
@@ -756,9 +759,12 @@ impl Db {
         }
         let wh = wh.join(" AND ");
         let c = self.c();
-        let mut counts = json!({ "all": 0, "linked": 0, "signed_out": 0, "making": 0, "failed": 0 });
+        let mut counts =
+            json!({ "all": 0, "linked": 0, "signed_out": 0, "making": 0, "failed": 0 });
         {
-            let mut st = c.prepare(&format!("SELECT {GROUP}, COUNT(*) {FROM} WHERE {wh} GROUP BY 1"))?;
+            let mut st = c.prepare(&format!(
+                "SELECT {GROUP}, COUNT(*) {FROM} WHERE {wh} GROUP BY 1"
+            ))?;
             let mut rows = st.query(rusqlite::params_from_iter(&args))?;
             let mut all = 0;
             while let Some(r) = rows.next()? {
@@ -772,7 +778,9 @@ impl Db {
         }
         let tabs: Vec<serde_json::Value> = c
             .prepare("SELECT platform, COUNT(*) FROM accounts GROUP BY platform ORDER BY platform")?
-            .query_map([], |r| Ok(json!({ "platform": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)? })))?
+            .query_map([], |r| {
+                Ok(json!({ "platform": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)? }))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         let mut wh = wh;
         let total = match &f.group {
@@ -831,7 +839,9 @@ impl Db {
                 }))
             })?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(json!({ "items": items, "total": total, "offset": f.offset, "tabs": tabs, "counts": counts }))
+        Ok(
+            json!({ "items": items, "total": total, "offset": f.offset, "tabs": tabs, "counts": counts }),
+        )
     }
 
     /// A Make run's progress: linked and failed accounts of `job`, and the

@@ -17,7 +17,7 @@ use anyhow::{anyhow, bail, Result};
 use futures_util::future::BoxFuture;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::errors::error_code;
 use super::mail::{link_pick, wait_for_new_mail, EleClient, POLL_INTERVAL};
@@ -417,7 +417,9 @@ impl RunState {
         (self.running.load(SeqCst) && job > 0).then(|| (job, self.total.load(SeqCst)))
     }
 
-    pub fn json(&self) -> Value {
+    /// Read by the tests; our pages read `pages::run_state`.
+    #[cfg(test)]
+    pub fn json(&self) -> serde_json::Value {
         json!({
             "running": self.running.load(SeqCst),
             "done": self.done.load(SeqCst),
