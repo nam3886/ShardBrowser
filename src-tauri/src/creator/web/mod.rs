@@ -594,9 +594,10 @@ mod engine_tests {
     }
 
     /// Live Breeze M2: the verify link's page sends itself on to the app while it
-    /// still loads; the next goto (sent at once, while that redirect is in flight)
-    /// must not end on the redirect's DOMContentLoaded, or every later goto lands
-    /// one page behind.
+    /// still loads; the next goto (sent while the page's own redirect is still
+    /// pending, its timer has not fired) must not be overridden by that redirect,
+    /// or every later goto lands one page behind. Checks a pending page redirect
+    /// doesn't override our goto.
     #[tokio::test]
     async fn goto_waits_for_its_own_page_not_a_client_redirect() {
         let Some(b) = TestBrowser::launch().await else {
