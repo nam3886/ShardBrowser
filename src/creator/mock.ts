@@ -306,6 +306,9 @@ const HANDLERS: Record<string, (args: Record<string, unknown>) => unknown> = {
     const ok = lines.filter((l) => l.split("|").length === 5 && l.includes("@"));
     return { valid: ok.length, invalid: lines.length - ok.length };
   },
+  /** A Make run (the real one makes Breeze Blue accounts one by one). */
+  breeze_run: () => null,
+  breeze_stop: () => null,
   settings: () => settings,
   settings_set: (a) => {
     const patch = a.patch as Partial<CreatorSettings>;

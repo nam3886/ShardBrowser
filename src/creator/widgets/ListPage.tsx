@@ -50,6 +50,8 @@ export function ListPage<Id extends string, Row extends { id: number }>({
     const el = scrollRef.current;
     if (!el) return;
     const check = () => { if (el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_END) onEnd(); };
+    // A first window that does not fill the list: the next one at once.
+    check();
     el.addEventListener("scroll", check, { passive: true });
     return () => el.removeEventListener("scroll", check);
   }, [scrollRef, onEnd]);

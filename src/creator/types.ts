@@ -181,6 +181,9 @@ export type ProxyDetail = ProxyRow & {
 /** The sidebar group's counts. */
 export type NavCounts = { accounts: number; emails: number; platforms: number; proxies: number };
 
+/** Our Settings tab. The real backend answers `ele_api_url`, `ele_key_saved`
+ *  and `proxy_rest_days` (M2); the rest is the mock's until M5-M7, and the
+ *  tab shows those groups only in `dev:mock`. */
 export type CreatorSettings = {
   ele_api_url: string;
   /** Write-only keys: the backend says whether one is saved, never what it is. */

@@ -9,7 +9,7 @@
 //! key, Ele key or a proxy password (`Scrub`).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering::SeqCst};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use anyhow::{anyhow, bail, Result};
 use futures_util::future::BoxFuture;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::errors::error_code;
 use super::mail::{link_pick, wait_for_new_mail, EleClient, POLL_INTERVAL};
@@ -33,9 +33,8 @@ pub const NO_BROWSER: &str = "No browser";
 pub const NO_ADDRESS: &str = "Email has no address";
 /// No usable proxy for a new account's browser.
 pub const NO_PROXY: &str = "No healthy proxy for a new browser";
-/// The settings our pages read and write; the Ele key is never read back.
-const SETTINGS: [&str; 3] = ["ele_api_url", "ele_api_key", "proxy_rest_seconds"];
-const SECRET_SETTING: &str = "ele_api_key";
+/// Never read back by our pages; masked in every stored text.
+pub const SECRET_SETTING: &str = "ele_api_key";
 
 /// How the run opens, checks and stops an account's browser: Shard's profiles
 /// in the app (`Shard`), a bare test engine in tests.
@@ -386,6 +385,8 @@ pub struct RunState {
     running: AtomicBool,
     done: AtomicU32,
     total: AtomicU32,
+    /// Its `jobs` row (0 until made).
+    job: AtomicI64,
     /// "Stop after this account": checked between accounts only.
     pub stop: AtomicBool,
 }
@@ -401,6 +402,7 @@ impl RunState {
         }
         self.done.store(0, SeqCst);
         self.total.store(total, SeqCst);
+        self.job.store(0, SeqCst);
         self.stop.store(false, SeqCst);
         Ok(())
     }
@@ -409,7 +411,15 @@ impl RunState {
         self.running.store(false, SeqCst);
     }
 
-    pub fn json(&self) -> Value {
+    /// The running job's id and requested count; None when no run is on.
+    pub fn job(&self) -> Option<(i64, u32)> {
+        let job = self.job.load(SeqCst);
+        (self.running.load(SeqCst) && job > 0).then(|| (job, self.total.load(SeqCst)))
+    }
+
+    /// Read by the tests; our pages read `pages::run_state`.
+    #[cfg(test)]
+    pub fn json(&self) -> serde_json::Value {
         json!({
             "running": self.running.load(SeqCst),
             "done": self.done.load(SeqCst),
@@ -430,9 +440,16 @@ pub async fn make_breeze<B: Browsers>(
     proxy_mode: &str,
     run: &RunState,
 ) -> Vec<Outcome> {
-    let job = match cx.db.job_create(KEY, count.into(), proxy_mode) {
-        Ok(j) => j,
-        Err(e) => return vec![failed(format!("{e:#}"))],
+    // `begin_job` made it already (the app's run); tests come without one.
+    let job = match run.job.load(SeqCst) {
+        0 => match cx.db.job_create(KEY, count.into(), proxy_mode) {
+            Ok(j) => {
+                run.job.store(j, SeqCst);
+                j
+            }
+            Err(e) => return vec![failed(format!("{e:#}"))],
+        },
+        j => j,
     };
     let mut out = Vec::new();
     for _ in 0..count {
@@ -515,6 +532,37 @@ impl Drop for EndRun {
     }
 }
 
+/// Begin `run` and make its `jobs` row at once, so the page's first
+/// `run_state` after Make already shows the job (and starts following it).
+pub fn begin_job(db: &Db, run: &RunState, count: u32, proxy_mode: &str) -> Result<i64> {
+    run.begin(count)?;
+    match db.job_create(KEY, count.into(), proxy_mode) {
+        Ok(j) => {
+            run.job.store(j, SeqCst);
+            Ok(j)
+        }
+        Err(e) => {
+            run.end();
+            Err(e)
+        }
+    }
+}
+
+/// Where failure screenshots go (`<account_id>.png`).
+pub fn screens_dir() -> Result<PathBuf> {
+    Ok(crate::store::local_root()?.join("creator").join("screens"))
+}
+
+/// The Ele client on the saved address and key.
+pub fn ele_client(db: &Arc<Db>) -> Result<EleClient> {
+    let setting = |k| db.settings_get(k).map(Option::unwrap_or_default);
+    Ok(EleClient::new(
+        &setting("ele_api_url")?,
+        &setting(SECRET_SETTING)?,
+        db.clone(),
+    )?)
+}
+
 /// Start a Make run in the background (`breeze_run`).
 pub fn start(count: u32, proxy_mode: String) -> Result<()> {
     if !(1..=20).contains(&count) {
@@ -524,13 +572,8 @@ pub fn start(count: u32, proxy_mode: String) -> Result<()> {
         bail!("unknown proxy mode: {proxy_mode}");
     }
     let db = db()?;
-    let setting = |k| db.settings_get(k).map(Option::unwrap_or_default);
-    let ele = EleClient::new(
-        &setting("ele_api_url")?,
-        &setting(SECRET_SETTING)?,
-        db.clone(),
-    )?;
-    let screens = crate::store::local_root()?.join("creator").join("screens");
+    let ele = ele_client(&db)?;
+    let screens = screens_dir()?;
     let cx = Ctx {
         db,
         ele,
@@ -539,96 +582,12 @@ pub fn start(count: u32, proxy_mode: String) -> Result<()> {
         tm: Timings::default(),
         screens,
     };
-    RUN.begin(count)?;
+    begin_job(&cx.db, &RUN, count, &proxy_mode)?;
     tokio::spawn(async move {
         let _end = EndRun;
         make_breeze(&cx, count, &proxy_mode, &RUN).await;
     });
     Ok(())
-}
-
-fn arg<'a>(args: &'a Value, k: &str) -> Result<&'a str> {
-    args[k].as_str().ok_or_else(|| anyhow!("{k} required"))
-}
-
-/// Our commands (`creator_call`); None for a command that is not ours here.
-pub async fn call(cmd: &str, args: &Value) -> Option<Result<Value>> {
-    Some(match cmd {
-        "settings_get" => db().and_then(|db| settings_get(&db, args)),
-        "settings_set" => db().and_then(|db| settings_set(&db, args)),
-        "import_basics" => (|| {
-            let n = store::import_basics(&*db()?, std::path::Path::new(arg(args, "path")?))?;
-            Ok(
-                json!({ "proxies": n.proxies, "blocked_domains": n.blocked_domains, "settings": n.settings }),
-            )
-        })(),
-        "breeze_run" => {
-            let count = args["count"].as_u64().unwrap_or(0).min(u32::MAX.into()) as u32;
-            let mode = args["proxy_mode"].as_str().unwrap_or("rotate").to_string();
-            start(count, mode).map(|()| Value::Null)
-        }
-        "breeze_stop" => {
-            RUN.stop.store(true, SeqCst);
-            Ok(Value::Null)
-        }
-        "run_state" => Ok(RUN.json()),
-        "accounts" => db().and_then(|db| accounts(&db, args)),
-        "events" => (|| {
-            let id = args["account_id"]
-                .as_i64()
-                .ok_or_else(|| anyhow!("account_id required"))?;
-            let rows = db()?.events_of(id)?;
-            Ok(Value::from(
-                rows.iter()
-                    .map(|e| {
-                        json!({ "id": e.id, "level": e.level, "step": e.step,
-                                "message": e.message, "created_at": e.created_at })
-                    })
-                    .collect::<Vec<_>>(),
-            ))
-        })(),
-        _ => return None,
-    })
-}
-
-/// The Accounts list: `platform` (Breeze Blue by default), `limit` 1..1000 (100).
-fn accounts(db: &Db, args: &Value) -> Result<Value> {
-    let platform = args["platform"].as_str().unwrap_or(KEY);
-    let limit = args["limit"].as_i64().unwrap_or(100).clamp(1, 1000);
-    Ok(Value::from(db.account_rows(platform, limit)?))
-}
-
-/// `{key: value}` for `keys`; the Ele key only says whether it is set.
-fn settings_get(db: &Db, args: &Value) -> Result<Value> {
-    let mut out = serde_json::Map::new();
-    for k in args["keys"].as_array().into_iter().flatten() {
-        let k = k.as_str().unwrap_or("");
-        if !SETTINGS.contains(&k) {
-            bail!("unknown setting: {k}");
-        }
-        let v = db.settings_get(k)?;
-        out.insert(
-            k.into(),
-            if k == SECRET_SETTING {
-                Value::from(v.is_some_and(|v| !v.is_empty()))
-            } else {
-                Value::from(v)
-            },
-        );
-    }
-    Ok(Value::Object(out))
-}
-
-/// One of `SETTINGS`, trimmed; an empty (or blank) Ele key means "unchanged".
-fn settings_set(db: &Db, args: &Value) -> Result<Value> {
-    let (k, v) = (arg(args, "key")?, arg(args, "value")?.trim());
-    if !SETTINGS.contains(&k) {
-        bail!("unknown setting: {k}");
-    }
-    if !(k == SECRET_SETTING && v.is_empty()) {
-        db.settings_set(k, v)?;
-    }
-    Ok(Value::Null)
 }
 
 #[cfg(test)]

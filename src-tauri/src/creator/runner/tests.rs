@@ -7,6 +7,8 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use serde_json::Value;
+
 use super::*;
 use crate::creator::store::MailMessage;
 use crate::creator::store::{temp_db, TempFile};
@@ -502,40 +504,19 @@ fn scrub_masks_quoted_forms_and_skips_short_values() {
     assert_eq!(s.clean("abc p@ss w/rd p%40ss+w%2Frd"), "abc *** ***");
 }
 
-#[test]
-fn accounts_limit_is_clamped_and_a_blank_ele_key_is_unchanged() {
-    let (db, _f) = temp_db();
-    for i in 0..3 {
-        let mb = db
-            .mailbox_create("ele", &format!("u{i}@a.test"), "a.test", "t")
-            .unwrap();
-        db.account_create(mb.id, KEY, "email", None).unwrap();
-    }
-    let n = |limit: Value| {
-        let rows = accounts(&db, &json!({ "limit": limit })).unwrap();
-        rows.as_array().unwrap().len()
-    };
-    assert_eq!((n(json!(0)), n(json!(-5)), n(json!(2))), (1, 1, 2));
-    assert_eq!(n(json!(1_000_000)), 3);
-
-    let set = |k: &str, v: &str| settings_set(&db, &json!({ "key": k, "value": v }));
-    set("ele_api_key", " KEY-1 ").unwrap();
-    set("ele_api_key", "   ").unwrap();
-    set("ele_api_key", "").unwrap();
+#[tokio::test]
+async fn the_job_is_seen_from_the_start_and_its_accounts_join_it() {
+    let ele = fake_ele(200, vec![]).await;
+    let (cx, _f) = ctx(&ele.site, String::new(), Urls::live());
+    let run = RunState::default();
+    let job = begin_job(&cx.db, &run, 1, "rotate").unwrap();
     assert_eq!(
-        db.settings_get("ele_api_key").unwrap().as_deref(),
-        Some("KEY-1")
+        run.job(),
+        Some((job, 1)),
+        "live before the spawned run starts"
     );
-    set("ele_api_url", " https://ele.test/api ").unwrap();
-    assert_eq!(
-        db.settings_get("ele_api_url").unwrap().as_deref(),
-        Some("https://ele.test/api")
-    );
-    assert!(set("max_chrome", "9").is_err());
-    let keys = json!({ "keys": ["ele_api_key", "ele_api_url"] });
-    let got = settings_get(&db, &keys).unwrap();
-    assert_eq!(
-        got,
-        json!({ "ele_api_key": true, "ele_api_url": "https://ele.test/api" })
-    );
+    assert!(begin_job(&cx.db, &run, 1, "rotate").is_err());
+    make_breeze(&cx, 1, "rotate", &run).await;
+    let a = cx.db.accounts_recent(KEY, 10).unwrap().remove(0);
+    assert_eq!(a.job_id, Some(job));
 }

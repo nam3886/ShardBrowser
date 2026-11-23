@@ -115,6 +115,39 @@ pub fn error_code(err: &str) -> Option<&'static str> {
     )
 }
 
+/// Python `Code.group` and `Code.retryable` (the table in
+/// `docs/creator/design/index.md`): the account Filters' failure kind, and
+/// whether Retry shows.
+pub fn fail_info(code: &str) -> (&'static str, bool) {
+    let group = match code {
+        "INTERRUPTED" | "QUIT_AFTER_OTP" | "WINDOW_CLOSED" => "stopped",
+        "PROXY_UNUSABLE" | "NO_PROXY" | "PROXY_REFUSED" | "PAGE_LOAD_FAILED" | "GEO_BLOCKED"
+        | "PROXY_CHECK_FAILED" => "proxy",
+        "CAPTCHA_RATE_LIMITED"
+        | "CAPTCHA_UNSOLVED"
+        | "CLOUDFLARE_LOOP"
+        | "CAPTCHA_EXTENSION"
+        | "NO_CAPTCHA_KEY" => "captcha",
+        "MAILBOX_GONE" | "MAIL_API_DOWN" | "NO_MAIL" | "CODE_NOT_SENT" | "CODE_REJECTED"
+        | "VERIFY_LINK_FAILED" | "DOMAIN_BLOCKED" | "EMAIL_REFUSED" => "mail",
+        "GOOGLE_REFUSED"
+        | "SIGNIN_REFUSED"
+        | "AGE_STEP_FAILED"
+        | "SIGNUP_NOT_COMPLETED"
+        | "NOT_SIGNED_IN"
+        | "API_KEY_FAILED"
+        | "NO_CHAT_REPLY" => "refused",
+        "ACCOUNT_EXISTS" | "ACCOUNT_BANNED" | "EMAIL_NOT_VERIFIED" | "GOOGLE_SIGNED_OUT"
+        | "PARENT_FAILED" | "SESSION_NOT_KEPT" | "CONSOLE_CHECK" => "account",
+        _ => "other",
+    };
+    let retryable = !matches!(
+        code,
+        "MAILBOX_GONE" | "DOMAIN_BLOCKED" | "EMAIL_REFUSED" | "ACCOUNT_EXISTS" | "ACCOUNT_BANNED"
+    );
+    (group, retryable)
+}
+
 /// Python `Code.streak`: whether a failure with this code counts toward a
 /// queue's fail streak (M5). Not the site's fault, or nothing a retry fixes:
 /// no.

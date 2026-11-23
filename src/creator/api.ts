@@ -3,11 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 /** The browser mock build (`npm run dev:mock`), checked as upstream does. */
 export const MOCK = import.meta.env.VITE_MOCK === "1";
 
-/** Whether our backend answers the page-data commands (proxy meta, settings).
- *  Until M7 wires them only the mock does, so a real build leaves Shard's
- *  Proxies page and Settings exactly as Shard draws them. M7 replaces this
- *  with the backend's answer. */
-export const CREATOR_DATA = MOCK;
+/** Whether our backend answers our Settings tab (Shard draws the tab and its
+ *  palette command only then). Ours always does since M2 (the Breeze Blue
+ *  settings); the mock answers the rest. */
+export const CREATOR_DATA: boolean = true;
 
 /** One of our backend commands, through the single `creator_call` Tauri
  *  command; `npm run dev:mock` answers from mock.ts instead (never bundled

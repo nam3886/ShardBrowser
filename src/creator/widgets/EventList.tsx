@@ -2,15 +2,23 @@
 // a step, its message on the first line, when and which step on a muted
 // second line; an error says so in the error text, as a failed test's
 // reason does there. Nothing logged: Proxy Peek's muted "none yet" line.
+import { useEffect } from "react";
 import { LoadError, LoadingRows } from "../../shared/ui/ListStates";
 import { fmtTs } from "../../shared/lib/utils";
 import { useCt } from "../i18n";
 import type { EventRow } from "../types";
 import { useCall } from "./parts";
 
-export function EventList({ accountId }: { accountId: number }) {
+/** `live`: the account is being made; its log is read again every 2 s. */
+export function EventList({ accountId, live = false }: { accountId: number; live?: boolean }) {
   const ct = useCt();
   const { data, error, status, reload } = useCall<EventRow[]>("account_events", { id: accountId }, String(accountId));
+  useEffect(() => {
+    if (!live) return;
+    const tick = setInterval(reload, 2000);
+    // Once more when it ends: the run's last lines.
+    return () => { clearInterval(tick); reload(); };
+  }, [live, reload]);
   if (status === "loading") return <LoadingRows rows={3} rowHeight={28} />;
   if (status === "error") return <LoadError what={ct("creator.events.what")} error={error} onRetry={reload} headingLevel={3} />;
   if (!data?.length) return <p className="m-0 text-secondary text-text-soft-400">{ct("creator.events.emptyTitle")}</p>;

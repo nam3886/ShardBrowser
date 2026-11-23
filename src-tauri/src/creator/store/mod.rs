@@ -219,6 +219,20 @@ pub struct AccountPatch {
     pub verified_at: Option<Option<String>>,
 }
 
+/// The Accounts list's filters (`account_list`); `group` is a status group
+/// (`linked`, `signed_out`, `making`, `failed`).
+#[derive(Debug, Clone, Default)]
+pub struct AccountQuery {
+    pub platform: Option<String>,
+    pub group: Option<String>,
+    pub flag: Option<String>,
+    pub q: String,
+    /// `newest` (default), `oldest`, `email`, `status`.
+    pub order: String,
+    pub offset: i64,
+    pub limit: i64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub id: i64,
@@ -713,32 +727,142 @@ impl Db {
         Ok(rows)
     }
 
-    /// The Accounts list, newest first: no secrets, only whether a key is kept.
-    pub fn account_rows(&self, platform: &str, limit: i64) -> Result<Vec<serde_json::Value>> {
+    /// One window of the Accounts list (`AccountList` in `src/creator/types.ts`):
+    /// the rows (never a secret), the total under the filters, the count per
+    /// platform and per status group (search and flag applied, group not).
+    pub fn account_list(&self, f: &AccountQuery) -> Result<serde_json::Value> {
+        use rusqlite::types::Value as V;
+        use serde_json::json;
+        const GROUP: &str = "CASE WHEN a.status='linked' AND a.verify_status IN ('signed_out','expired') \
+             THEN 'signed_out' WHEN a.status IN ('queued','running') THEN 'making' ELSE a.status END";
+        const FROM: &str = "FROM accounts a JOIN mailboxes m ON m.id=a.mailbox_id";
+        let mut wh = vec!["1=1".to_string()];
+        let mut args: Vec<V> = Vec::new();
+        if let Some(p) = &f.platform {
+            wh.push("a.platform=?".into());
+            args.push(V::Text(p.clone()));
+        }
+        let q = f.q.trim();
+        if !q.is_empty() {
+            let esc = q
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            wh.push("m.email LIKE ? ESCAPE '\\'".into());
+            args.push(V::Text(format!("%{esc}%")));
+        }
+        match f.flag.as_deref() {
+            Some("frozen") => wh.push("a.frozen=1".into()),
+            Some("pushed") => wh.push("a.relay_id IS NOT NULL".into()),
+            Some("not_pushed") => wh.push("a.relay_id IS NULL".into()),
+            _ => {}
+        }
+        let wh = wh.join(" AND ");
         let c = self.c();
-        let mut st = c.prepare(
-            "SELECT a.id, m.email, a.status, a.step, a.step_note, a.error_code, a.error, p.host, \
-             a.started_at, a.finished_at, json_extract(a.secrets, '$.api_key') IS NOT NULL \
-             FROM accounts a JOIN mailboxes m ON m.id=a.mailbox_id \
+        let mut counts =
+            json!({ "all": 0, "linked": 0, "signed_out": 0, "making": 0, "failed": 0 });
+        {
+            let mut st = c.prepare(&format!(
+                "SELECT {GROUP}, COUNT(*) {FROM} WHERE {wh} GROUP BY 1"
+            ))?;
+            let mut rows = st.query(rusqlite::params_from_iter(&args))?;
+            let mut all = 0;
+            while let Some(r) = rows.next()? {
+                let (g, n): (String, i64) = (r.get(0)?, r.get(1)?);
+                all += n;
+                if counts.get(&g).is_some() {
+                    counts[g] = n.into();
+                }
+            }
+            counts["all"] = all.into();
+        }
+        let tabs: Vec<serde_json::Value> = c
+            .prepare("SELECT platform, COUNT(*) FROM accounts GROUP BY platform ORDER BY platform")?
+            .query_map([], |r| {
+                Ok(json!({ "platform": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)? }))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut wh = wh;
+        let total = match &f.group {
+            Some(g) => {
+                wh.push_str(&format!(" AND {GROUP}=?"));
+                args.push(V::Text(g.clone()));
+                counts.get(g).and_then(|v| v.as_i64()).unwrap_or(0)
+            }
+            None => counts["all"].as_i64().unwrap_or(0),
+        };
+        let order = match f.order.as_str() {
+            "oldest" => "a.id",
+            "email" => "m.email, a.id",
+            "status" => "2, a.id DESC",
+            _ => "a.id DESC",
+        };
+        args.push(V::Integer(f.limit));
+        args.push(V::Integer(f.offset));
+        let mut st = c.prepare(&format!(
+            "SELECT a.id, {GROUP}, a.mailbox_id, m.email, m.provider, a.platform, a.status, a.route, \
+             a.frozen, a.relay_id, a.error, a.error_code, a.verify_status, b.id, b.path, p.host, p.port, \
+             p.country, a.step_note, a.created_at {FROM} \
              LEFT JOIN browsers b ON b.mailbox_id=a.mailbox_id LEFT JOIN proxies p ON p.id=b.proxy_id \
-             WHERE a.platform=? ORDER BY a.id DESC LIMIT ?",
-        )?;
-        let rows = st
-            .query_map(params![platform, limit], |r| {
-                Ok(serde_json::json!({
-                    "id": r.get::<_, i64>(0)?, "email": r.get::<_, String>(1)?,
-                    "status": r.get::<_, String>(2)?, "step": r.get::<_, Option<String>>(3)?,
-                    "step_note": r.get::<_, Option<String>>(4)?,
-                    "error_code": r.get::<_, Option<String>>(5)?,
-                    "error": r.get::<_, Option<String>>(6)?,
-                    "proxy_host": r.get::<_, Option<String>>(7)?,
-                    "started_at": r.get::<_, Option<String>>(8)?,
-                    "finished_at": r.get::<_, Option<String>>(9)?,
-                    "has_key": r.get::<_, bool>(10)?,
+             WHERE {wh} ORDER BY {order} LIMIT ? OFFSET ?"
+        ))?;
+        let items: Vec<serde_json::Value> = st
+            .query_map(rusqlite::params_from_iter(&args), |r| {
+                let status: String = r.get(6)?;
+                let code: Option<String> = r.get(11)?;
+                let host: Option<String> = r.get(15)?;
+                let port: Option<i64> = r.get(16)?;
+                Ok(json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "mailbox_id": r.get::<_, i64>(2)?,
+                    "email": r.get::<_, String>(3)?,
+                    "mailbox_type": r.get::<_, String>(4)?,
+                    "platform": r.get::<_, String>(5)?,
+                    "route": r.get::<_, String>(7)?,
+                    "frozen": r.get::<_, i64>(8)? != 0,
+                    "busy": status == "queued" || status == "running",
+                    "relay_id": r.get::<_, Option<String>>(9)?,
+                    "error": r.get::<_, Option<String>>(10)?,
+                    "fail": code.as_deref().map(|c| {
+                        let (group, retryable) = super::errors::fail_info(c);
+                        json!({ "code": c, "group": group, "retryable": retryable })
+                    }),
+                    "verify_status": r.get::<_, Option<String>>(12)?,
+                    "browser_id": r.get::<_, Option<i64>>(13)?,
+                    "profile_id": r.get::<_, Option<String>>(14)?,
+                    "proxy": host.map(|h| format!("{h}:{}", port.unwrap_or(0))),
+                    "proxy_cc": r.get::<_, Option<String>>(17)?.filter(|c| !c.is_empty()),
+                    // What a running account is doing now; a finished one's last note is history.
+                    "step": if status == "running" { r.get::<_, Option<String>>(18)? } else { None },
+                    "created_at": r.get::<_, String>(19)?,
+                    "status": status,
                 }))
             })?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
+        Ok(
+            json!({ "items": items, "total": total, "offset": f.offset, "tabs": tabs, "counts": counts }),
+        )
+    }
+
+    /// A Make run's progress: linked and failed accounts of `job`, and the
+    /// step note of the one running now.
+    pub fn job_progress(&self, job: i64) -> Result<(i64, i64, Option<String>)> {
+        Ok(self.c().query_row(
+            "SELECT COUNT(*) FILTER (WHERE status='linked'), COUNT(*) FILTER (WHERE status='failed'), \
+             (SELECT step_note FROM accounts WHERE job_id=?1 AND status='running' ORDER BY id DESC LIMIT 1) \
+             FROM accounts WHERE job_id=?1",
+            [job],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    }
+
+    /// The sidebar's counts: accounts, mailboxes, proxies.
+    pub fn nav_counts(&self) -> Result<(i64, i64, i64)> {
+        Ok(self.c().query_row(
+            "SELECT (SELECT COUNT(*) FROM accounts), (SELECT COUNT(*) FROM mailboxes), (SELECT COUNT(*) FROM proxies)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
     }
 
     /// Never pass a secret in `message` (Global Constraints).

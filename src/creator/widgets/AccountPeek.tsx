@@ -9,7 +9,7 @@ import { PeekBody, PeekHeader, PeekPanel, PeekSection, PropertyRow, PropertyShee
 import { fmtTs } from "../../shared/lib/utils";
 import { toast } from "../../shared/model/toast";
 import { confirmModal } from "../../shared/model/confirm";
-import { call } from "../api";
+import { call, MOCK } from "../api";
 import { useCt } from "../i18n";
 import type { AccountRow, PlatformCard } from "../types";
 import { EventList } from "./EventList";
@@ -35,7 +35,7 @@ export function AccountPeek({ account, onClose }: { account: AccountRow | null; 
 
   const events = (
     <PeekSection id="events" title={ct("creator.peek.events")}>
-      <EventList key={a.id} accountId={a.id} />
+      <EventList key={a.id} accountId={a.id} live={a.busy} />
     </PeekSection>
   );
 
@@ -45,12 +45,13 @@ export function AccountPeek({ account, onClose }: { account: AccountRow | null; 
         subject={String(a.id)}
         title={<h2 className="m-0 min-w-0 truncate text-panel-title text-text-strong-950">{a.email}</h2>}
         status={<AccountPill a={a} />}
-        extra={a.browser_id != null && (
+        // Open browser, Retry, Log in again, Check and the More menu are mock-only until their backend comes (M5-M7).
+        extra={MOCK && a.browser_id != null && (
           <Button variant="neutral" mode="stroke" size="3xsmall" leftIcon={<NavBrowsersIcon className="size-3.5" />} onClick={() => toast.info(ct("creator.peek.opening"))}>
             {ct("creator.peek.openBrowser")}
           </Button>
         )}
-        primary={a.status === "linked" && (a.verify_status === "signed_out" || a.verify_status === "expired") ? (
+        primary={!MOCK ? undefined : a.status === "linked" && (a.verify_status === "signed_out" || a.verify_status === "expired") ? (
           <Button variant="primary" mode="lighter" size="3xsmall" leftIcon={<RefreshIcon className="size-3.5" />} onClick={() => toast.ok(ct("creator.action.loggingIn"))}>
             {ct("creator.action.logIn")}
           </Button>
@@ -63,7 +64,7 @@ export function AccountPeek({ account, onClose }: { account: AccountRow | null; 
             {ct("creator.action.verify")}
           </Button>
         ) : undefined}
-        menuItems={[
+        menuItems={!MOCK ? undefined : [
           {
             label: a.frozen ? ct("creator.action.unfreeze") : ct("creator.action.freeze"),
             // A pushed account in use here may sign out the relay's copy: Unfreeze asks first.

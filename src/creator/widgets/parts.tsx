@@ -44,16 +44,23 @@ export function useWindowed<R extends { items: unknown[]; total: number }>(cmd: 
   const first = useCall<R>(cmd, { ...spec, offset: 0, limit: WINDOW }, key);
   const [extra, setExtra] = useState<{ key: string; items: R["items"] }>({ key, items: [] });
   const [busy, setBusy] = useState(false);
+  // A window that failed is not asked for again until a reload: the list
+  // asks on every render while its end is in view.
+  const [failed, setFailed] = useState<string | null>(null);
   const rest = extra.key === key ? extra.items : [];
   const items = [...(first.data?.items ?? []), ...rest] as R["items"];
-  const more = () => {
-    if (busy || !first.data || items.length >= first.data.total) return;
+  const total = first.data?.total;
+  const more = useCallback(() => {
+    if (busy || failed === key || total === undefined || items.length >= total) return;
     setBusy(true);
     call<R>(cmd, { ...spec, offset: items.length, limit: WINDOW })
-      .then((r) => setExtra({ key, items: [...rest, ...r.items] }), () => {})
+      .then((r) => setExtra({ key, items: [...rest, ...r.items] }), () => setFailed(key))
       .finally(() => setBusy(false));
-  };
-  return { ...first, items, more };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `key` stands for `spec`; `rest` for `items`
+  }, [cmd, key, busy, failed, total, items.length]);
+  const { reload: load } = first;
+  const reload = useCallback(() => { setFailed(null); load(); }, [load]);
+  return { ...first, reload, items, more };
 }
 
 // ponytail: initials on a label-chip tint stand in for brand logos (owner gap: logo assets).
