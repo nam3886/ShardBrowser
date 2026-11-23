@@ -1,6 +1,6 @@
 # Windows test box workflow
 
-Code is edited on the Mac. Anything that needs Windows (build, full gates, live runs) happens on the Windows test box, which fetches from GitHub and never pushes. Toolchain, build, sandboxing and the live harness are in `windows-build.md`; the gates are in `working-process.md` §7. This page holds only the box procedure and its gotchas.
+Code is edited on the Mac, which has no Rust toolchain. Everything else (build, all tests, dev runs, live runs) happens on the Windows test box, which fetches from GitHub and never pushes. Toolchain, build, sandboxing and the live harness are in `windows-build.md`; the gates are in `working-process.md` §7. This page holds only the box procedure and its gotchas.
 
 ## Flow
 
