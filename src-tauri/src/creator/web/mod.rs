@@ -269,7 +269,9 @@ impl Page {
                         if ours.as_ref() == Some(&ev.loader_id) {
                             return Ok(());
                         }
-                        loaded.push(ev.loader_id.clone());
+                        if ours.is_none() {
+                            loaded.push(ev.loader_id.clone());
+                        }
                     }
                 }
             }
@@ -592,9 +594,9 @@ mod engine_tests {
     }
 
     /// Live Breeze M2: the verify link's page sends itself on to the app while it
-    /// still loads; the next goto (queued by chromiumoxide behind that `load`) must
-    /// not end on the redirect's DOMContentLoaded, or every later goto lands one
-    /// page behind.
+    /// still loads; the next goto (sent at once, while that redirect is in flight)
+    /// must not end on the redirect's DOMContentLoaded, or every later goto lands
+    /// one page behind.
     #[tokio::test]
     async fn goto_waits_for_its_own_page_not_a_client_redirect() {
         let Some(b) = TestBrowser::launch().await else {
@@ -618,6 +620,40 @@ mod engine_tests {
             )
             .route("/b", get(doc(r#"<title>b</title><img src="/slow.png">"#)))
             .route("/c", get(doc("<title>c</title>")));
+        let site = FixtureServer::start_with(routes).await;
+        let page = b.page().await;
+        page.goto(&format!("{}/a", site.site)).await.unwrap();
+        page.goto(&format!("{}/c", site.site)).await.unwrap();
+        assert!(page.url().await.ends_with("/c"), "{}", page.url().await);
+        assert_eq!(page.title().await, "c");
+    }
+
+    /// A subframe's DOMContentLoaded (its own loader) fires before our document
+    /// commits: goto must wait for the loader Page.navigate named, not the first DCL.
+    #[tokio::test]
+    async fn goto_ignores_a_subframes_domcontentloaded() {
+        let Some(b) = TestBrowser::launch().await else {
+            return;
+        };
+        let doc = |body: &'static str| {
+            move || async move { ([(header::CONTENT_TYPE, "text/html")], body) }
+        };
+        let routes = axum::Router::new()
+            .route("/a", get(doc(r#"<title>a</title><iframe src="/frame"></iframe>"#)))
+            .route(
+                "/frame",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    ([(header::CONTENT_TYPE, "text/html")], "<title>frame</title>")
+                }),
+            )
+            .route(
+                "/c",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    ([(header::CONTENT_TYPE, "text/html")], "<title>c</title>")
+                }),
+            );
         let site = FixtureServer::start_with(routes).await;
         let page = b.page().await;
         page.goto(&format!("{}/a", site.site)).await.unwrap();
