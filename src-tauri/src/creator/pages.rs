@@ -187,8 +187,9 @@ fn settings_set(db: &Db, args: &Value) -> Result<Value> {
     let patch = &args["patch"];
     if let Some(url) = patch["ele_api_url"].as_str() {
         let url = url.trim();
-        let web = url::Url::parse(url)
-            .is_ok_and(|u| ["http", "https"].contains(&u.scheme()) && u.host_str().is_some_and(|h| !h.is_empty()));
+        let web = url::Url::parse(url).is_ok_and(|u| {
+            ["http", "https"].contains(&u.scheme()) && u.host_str().is_some_and(|h| !h.is_empty())
+        });
         if !url.is_empty() && !web {
             bail!("Ele API address must start with http:// or https://");
         }
@@ -225,7 +226,10 @@ fn screenshot(db: &Db, id: i64, screens: &Path) -> Result<Value> {
         };
         p.starts_with(&dir).then_some(p)
     };
-    let Some(png) = path.and_then(|p| inside(Path::new(&p))).and_then(|p| std::fs::read(p).ok()) else {
+    let Some(png) = path
+        .and_then(|p| inside(Path::new(&p)))
+        .and_then(|p| std::fs::read(p).ok())
+    else {
         return Ok(Value::Null);
     };
     let b64 = base64::engine::general_purpose::STANDARD.encode(png);
@@ -402,7 +406,10 @@ mod tests {
             assert!(set(json!({ "ele_api_url": bad }), "").is_err(), "{bad}");
         }
         assert!(set(json!({ "ele_api_url": "HTTPS://Ele.test/api" }), "").is_ok());
-        assert!(set(json!({ "proxy_rest_days": i64::MAX }), "").is_ok(), "no overflow");
+        assert!(
+            set(json!({ "proxy_rest_days": i64::MAX }), "").is_ok(),
+            "no overflow"
+        );
         // Hours from the Python app survive a save that leaves the days alone.
         db.settings_set("proxy_rest_seconds", "3600").unwrap();
         set(json!({ "proxy_rest_days": 0 }), "").unwrap();
@@ -439,7 +446,10 @@ mod tests {
             db.account_update(id, &patch).unwrap();
             screenshot(&db, id, &screens).unwrap()
         };
-        assert!(shot(&inside).as_str().unwrap().starts_with("data:image/png;base64,"));
+        assert!(shot(&inside)
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
         assert_eq!(shot(&outside), Value::Null);
         assert_eq!(shot(&screens.join("..").join("secret.png")), Value::Null);
         assert_eq!(shot(&screens.join("gone.png")), Value::Null);
