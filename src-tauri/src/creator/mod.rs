@@ -12,11 +12,16 @@ pub mod mail;
 #[allow(dead_code)]
 pub mod profile;
 #[allow(dead_code)]
+pub mod providers;
+#[allow(dead_code)]
 pub mod proxy;
 #[allow(dead_code)]
 pub mod shard;
 #[allow(dead_code)]
 pub mod store;
+#[cfg(test)]
+mod testsite;
+// Used by the providers from M2 on.
 #[allow(dead_code)]
 pub mod web;
 

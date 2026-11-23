@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>API keys - Breeze Blue</title></head>
+<body>
+  <h1>API keys</h1>
+  <p>Your keys: <code>brz_Ab3x&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</code></p>
+  <button type="button" id="create">Create API key</button>
+  <div role="dialog" aria-label="New API key" id="dlg" hidden>
+    <input name="name" placeholder="Key name">
+    <button type="button" id="make">Create key</button>
+    <div id="out"></div>
+    <button type="button" id="done" hidden>Done</button>
+  </div>
+<script>
+  const K = /*KNOBS*/{};
+  const $ = (id) => document.getElementById(id);
+  const ev = (e) => fetch("/api/ev", { method: "POST", body: e, keepalive: true });
+  // The app sends a new account to the survey a moment after this page loads.
+  if (K.survey_after_load) setTimeout(() => { location = "/welcome"; }, 300);
+  $("create").addEventListener("click", () => { ev("click Create API key"); $("dlg").hidden = false; });
+  $("make").addEventListener("click", async () => {
+    ev("click Create key");
+    const r = await (await fetch("/api/keys", { method: "POST", body: document.querySelector("input[name=name]").value })).json();
+    $("out").innerHTML = "<code>curl ...</code> <code></code>";
+    $("out").lastChild.textContent = r.key;
+    $("done").hidden = false;
+  });
+  $("done").addEventListener("click", () => { ev("click Done"); $("dlg").hidden = true; $("out").textContent = ""; });
+</script>
+</body></html>
