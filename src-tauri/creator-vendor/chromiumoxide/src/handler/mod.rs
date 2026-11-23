@@ -681,6 +681,8 @@ impl<T> NavigationInProgress<T> {
 
 /// Request type for navigation
 #[derive(Debug)]
+// creator patch: never built since Page.navigate is a plain command; left as upstream.
+#[allow(dead_code)]
 enum NavigationRequest {
     /// Represents a simple `NavigateParams` ("Page.navigate")
     Navigate(NavigationInProgress<Result<Response>>),
