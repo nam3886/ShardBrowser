@@ -7,6 +7,9 @@
 //! upstream files again.
 
 pub mod shard;
+// Used by the runner from M2 Task 12 on.
+#[allow(dead_code)]
+pub mod store;
 // Used by the providers from M2 on.
 #[allow(dead_code)]
 pub mod web;
