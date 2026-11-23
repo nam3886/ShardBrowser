@@ -19,13 +19,16 @@ export function EmailPeek({ email, onClose }: { email: EmailRow | null; onClose:
   const m = useLatched(email);
   // Refresh reads the inbox again (the `email` call polls it first).
   const [rev, setRev] = useState(0);
+  // The badge follows what the Peek's own read found (a refresh can find it gone).
+  const [read, setRead] = useState<{ id: number; status: EmailRow["status"] } | null>(null);
   if (!presence.mounted || !m) return null;
+  const status = read?.id === m.id ? read.status : m.status;
   return (
     <PeekPanel kind="profile" label={ct("creator.emailPeek.label", { email: m.email })} presence={presence}>
       <PeekHeader
         subject={String(m.id)}
         title={<h2 className="m-0 min-w-0 truncate text-panel-title text-text-strong-950">{m.email}</h2>}
-        status={<Badge color={m.status === "gone" ? "error" : "gray"} size="small">{ct(`creator.emailState.${m.status}`)}</Badge>}
+        status={<Badge color={status === "gone" ? "error" : "gray"} size="small">{ct(`creator.emailState.${status}`)}</Badge>}
         primary={(
           <Button variant="primary" mode="lighter" size="3xsmall" leftIcon={<RefreshIcon className="size-3.5" />} onClick={() => setRev((r) => r + 1)}>
             {ct("creator.emailPeek.refresh")}
@@ -36,14 +39,15 @@ export function EmailPeek({ email, onClose }: { email: EmailRow | null; onClose:
         closeLabel={ct("creator.peek.close")}
         onClose={onClose}
       />
-      <Body key={`${m.id}:${rev}`} id={m.id} rev={rev} />
+      <Body key={`${m.id}:${rev}`} id={m.id} rev={rev} onRead={setRead} />
     </PeekPanel>
   );
 }
 
-function Body({ id, rev }: { id: number; rev: number }) {
+function Body({ id, rev, onRead }: { id: number; rev: number; onRead: (r: { id: number; status: EmailRow["status"] }) => void }) {
   const ct = useCt();
   const { data, error, status, reload } = useCall<EmailDetail>("email", { id }, `${id}:${rev}`);
+  useEffect(() => { if (data) onRead({ id: data.id, status: data.status }); }, [data, onRead]);
   if (status === "loading") return <PeekBody><div className="p-inset"><LoadingRows rows={5} /></div></PeekBody>;
   if (status === "error" || !data) return <PeekBody><LoadError what={ct("creator.emails.what")} error={error} onRetry={reload} headingLevel={3} /></PeekBody>;
   const row = (rid: string, label: string, value: React.ReactNode, empty = false, o: { copy?: React.ReactNode } = {}) => (

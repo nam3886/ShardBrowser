@@ -72,6 +72,8 @@ export function EmailsPage() {
   const plats = useCall<PlatformCard[]>("platforms", undefined, "");
   const data = list.data;
   const freeCount = plats.data?.find((p) => p.key === freeFor)?.free ?? 0;
+  // Adding, testing or making changes the rows and the free counts.
+  const reload = () => { list.reload(); plats.reload(); };
   const filtered = !!(kind || state || freeFor);
   const nothing = list.status === "ready" && data?.counts.all === 0 && !q.trim() && !filtered;
   const n = selected.size;
@@ -79,7 +81,7 @@ export function EmailsPage() {
   const testAll = () => {
     void call<number[]>("email_ids", { kind, status: state, free_for: freeFor, q })
       .then((ids) => testEmails(ids), (e) => toast.fail({ title: ct("creator.emails.checkAll"), detail: e }))
-      .then(list.reload);
+      .then(reload);
   };
   const pick = (set: (v: string | null) => void) => (v: string | null) => { set(v); setSelected(new Set()); };
   const fields: FilterField[] = [
@@ -157,7 +159,7 @@ export function EmailsPage() {
               n={n}
               onClear={() => setSelected(new Set())}
               actions={[
-                { id: "check", label: ct("creator.emails.check"), icon: <RefreshIcon className="size-3.5" />, onClick: () => void testEmails([...selected]).then(list.reload) },
+                { id: "check", label: ct("creator.emails.check"), icon: <RefreshIcon className="size-3.5" />, onClick: () => void testEmails([...selected]).then(reload) },
                 ...(MOCK ? [{ id: "export", label: ct("creator.action.export"), icon: <DownloadIcon className="size-3.5" />, onClick: () => {} }] : []),
               ]}
               more={MOCK ? [{ label: ct("creator.action.delete"), icon: <DeleteIcon className="size-3.5" />, danger: true, onSelect: () => void confirmDeleteEmails(n) }] : []}
@@ -166,9 +168,9 @@ export function EmailsPage() {
           peek={<EmailPeek email={list.items.find((m) => m.id === openId) ?? null} onClose={() => setOpenId(null)} />}
         />
       </PageBody>
-      <AddEmailsDialog open={adding} onClose={() => setAdding(false)} onAdded={list.reload} />
+      <AddEmailsDialog open={adding} onClose={() => setAdding(false)} onAdded={reload} />
       {/* Free emails are Outlook ones: Make starts on that route. */}
-      <MakeDialog open={!!makeFor} platform={makeFor ?? undefined} route="email:outlook" count={Math.min(freeCount, MAKE_MAX)} onClose={() => setMakeFor(null)} onStarted={list.reload} />
+      <MakeDialog open={!!makeFor} platform={makeFor ?? undefined} route="email:outlook" count={Math.min(freeCount, MAKE_MAX)} onClose={() => setMakeFor(null)} onStarted={reload} />
     </>
   );
 }
