@@ -63,7 +63,8 @@ pub async fn call(cmd: &str, args: &Value) -> Option<Result<Value>> {
             }
             Ok(Value::from(db.account_secret(id(args)?, key)?))
         }),
-        "account_screenshot" => runner::db().and_then(|db| screenshot(&db, args)),
+        "account_screenshot" => runner::db()
+            .and_then(|db| screenshot(&db, id(args)?, &runner::screens_dir()?)),
         _ => return None,
     })
 }
@@ -186,13 +187,15 @@ fn settings_set(db: &Db, args: &Value) -> Result<Value> {
     let patch = &args["patch"];
     if let Some(url) = patch["ele_api_url"].as_str() {
         let url = url.trim();
-        if !url.is_empty() && !(url.starts_with("http://") || url.starts_with("https://")) {
+        let web = url::Url::parse(url)
+            .is_ok_and(|u| ["http", "https"].contains(&u.scheme()) && u.host_str().is_some_and(|h| !h.is_empty()));
+        if !url.is_empty() && !web {
             bail!("Ele API address must start with http:// or https://");
         }
         db.settings_set("ele_api_url", url)?;
     }
     if let Some(days) = patch["proxy_rest_days"].as_i64() {
-        let secs = (days * DAY).clamp(0, proxy::MAX_REST_SECONDS);
+        let secs = days.saturating_mul(DAY).clamp(0, proxy::MAX_REST_SECONDS);
         if settings(db)?["proxy_rest_days"].as_i64() != Some(secs / DAY) {
             db.settings_set("proxy_rest_seconds", &secs.to_string())?;
         }
@@ -212,10 +215,17 @@ async fn test_ele() -> Result<Value> {
     Ok(json!({ "domains": domains.len() }))
 }
 
-/// The last page a failed sign-up saw, as a data URL; null with none.
-fn screenshot(db: &Db, args: &Value) -> Result<Value> {
-    let path = db.account_get(id(args)?)?.and_then(|a| a.screenshot);
-    let Some(png) = path.and_then(|p| std::fs::read(p).ok()) else {
+/// The last page a failed sign-up saw, as a data URL; null with none, and
+/// for a stored path that is not a file in `screens` (only ours are read).
+fn screenshot(db: &Db, id: i64, screens: &Path) -> Result<Value> {
+    let path = db.account_get(id)?.and_then(|a| a.screenshot);
+    let inside = |p: &Path| {
+        let (Ok(p), Ok(dir)) = (p.canonicalize(), screens.canonicalize()) else {
+            return None;
+        };
+        p.starts_with(&dir).then_some(p)
+    };
+    let Some(png) = path.and_then(|p| inside(Path::new(&p))).and_then(|p| std::fs::read(p).ok()) else {
         return Ok(Value::Null);
     };
     let b64 = base64::engine::general_purpose::STANDARD.encode(png);
@@ -282,14 +292,10 @@ mod tests {
         assert_eq!(keys(&ev[0]), fields("EventRow"));
 
         let run = RunState::default();
-        run.begin(2).unwrap();
-        assert_eq!(
-            run_state(&db, &run).unwrap()["jobs"],
-            json!([]),
-            "no job row yet"
-        );
-        run.job.store(job, SeqCst);
+        assert_eq!(run_state(&db, &run).unwrap()["jobs"], json!([]), "no run");
+        let job = runner::begin_job(&db, &run, 2, "none").unwrap();
         let st = run_state(&db, &run).unwrap();
+        assert_eq!(st["jobs"][0]["job_id"], job, "seen as soon as Make returns");
         assert_eq!(keys(&st), fields("RunState"));
         assert_eq!(keys(&st["jobs"][0]), fields("jobs"));
         assert_eq!(keys(&st["setup"]), fields("setup"));
@@ -392,7 +398,11 @@ mod tests {
             !got.to_string().contains("KEY-1"),
             "the key is never read back"
         );
-        assert!(set(json!({ "ele_api_url": "ele.test" }), "").is_err());
+        for bad in ["ele.test", "https://", "ftp://ele.test"] {
+            assert!(set(json!({ "ele_api_url": bad }), "").is_err(), "{bad}");
+        }
+        assert!(set(json!({ "ele_api_url": "HTTPS://Ele.test/api" }), "").is_ok());
+        assert!(set(json!({ "proxy_rest_days": i64::MAX }), "").is_ok(), "no overflow");
         // Hours from the Python app survive a save that leaves the days alone.
         db.settings_set("proxy_rest_seconds", "3600").unwrap();
         set(json!({ "proxy_rest_days": 0 }), "").unwrap();
@@ -408,5 +418,31 @@ mod tests {
             db.settings_get("proxy_rest_seconds").unwrap().as_deref(),
             Some("604800")
         );
+    }
+
+    #[test]
+    fn a_screenshot_is_read_only_from_the_screens_folder() {
+        let (db, _f) = temp_db();
+        let base = std::env::temp_dir().join(format!("creator-shots-{}", uuid::Uuid::new_v4()));
+        let screens = base.join("screens");
+        std::fs::create_dir_all(&screens).unwrap();
+        let (inside, outside) = (screens.join("1.png"), base.join("secret.png"));
+        std::fs::write(&inside, b"png").unwrap();
+        std::fs::write(&outside, b"png").unwrap();
+        let mb = db.mailbox_create("ele", "u@a.test", "a.test", "t").unwrap();
+        let id = db.account_create(mb.id, KEY, "email", None).unwrap();
+        let shot = |p: &Path| {
+            let patch = AccountPatch {
+                screenshot: Some(Some(p.display().to_string())),
+                ..Default::default()
+            };
+            db.account_update(id, &patch).unwrap();
+            screenshot(&db, id, &screens).unwrap()
+        };
+        assert!(shot(&inside).as_str().unwrap().starts_with("data:image/png;base64,"));
+        assert_eq!(shot(&outside), Value::Null);
+        assert_eq!(shot(&screens.join("..").join("secret.png")), Value::Null);
+        assert_eq!(shot(&screens.join("gone.png")), Value::Null);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

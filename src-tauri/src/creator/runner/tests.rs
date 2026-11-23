@@ -503,3 +503,16 @@ fn scrub_masks_quoted_forms_and_skips_short_values() {
     );
     assert_eq!(s.clean("abc p@ss w/rd p%40ss+w%2Frd"), "abc *** ***");
 }
+
+#[tokio::test]
+async fn the_job_is_seen_from_the_start_and_its_accounts_join_it() {
+    let ele = fake_ele(200, vec![]).await;
+    let (cx, _f) = ctx(&ele.site, String::new(), Urls::live());
+    let run = RunState::default();
+    let job = begin_job(&cx.db, &run, 1, "rotate").unwrap();
+    assert_eq!(run.job(), Some((job, 1)), "live before the spawned run starts");
+    assert!(begin_job(&cx.db, &run, 1, "rotate").is_err());
+    make_breeze(&cx, 1, "rotate", &run).await;
+    let a = cx.db.accounts_recent(KEY, 10).unwrap().remove(0);
+    assert_eq!(a.job_id, Some(job));
+}

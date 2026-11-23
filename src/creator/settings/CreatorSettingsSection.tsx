@@ -25,6 +25,9 @@ import type { CreatorSettings } from "../types";
 type Keys = { ele_api_key: string; yescaptcha_key: string; relay_key: string };
 const NO_KEYS: Keys = { ele_api_key: "", yescaptcha_key: "", relay_key: "" };
 
+/** The backend's limit (`proxy::MAX_REST_SECONDS`, 90 days). */
+const PROXY_REST_MAX_DAYS = 90;
+
 /** A save with no answer by then is a failed one (Shard's SAVE_TIMEOUT_MS). */
 const SAVE_TIMEOUT_MS = 10_000;
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -213,7 +216,7 @@ export function CreatorSettingsSection() {
           id="proxy-rest"
           title={ct("creator.settings.proxyRest")}
           help={ct("creator.settings.proxyRestHelp")}
-          control={({ labelId, helpId }) => <div className="w-[120px]"><NumField aria-labelledby={labelId} aria-describedby={helpId} value={s.proxy_rest_days} min={0} max={60} onChange={(v) => set({ proxy_rest_days: v })} /></div>}
+          control={({ labelId, helpId }) => <div className="w-[120px]"><NumField aria-labelledby={labelId} aria-describedby={helpId} value={s.proxy_rest_days} min={0} max={PROXY_REST_MAX_DAYS} onChange={(v) => set({ proxy_rest_days: v })} /></div>}
         />
       </SettingsGroup>
       {MOCK && <SettingsGroup title={ct("creator.settings.blockedTitle")} help={ct("creator.settings.blockedHelp")}>

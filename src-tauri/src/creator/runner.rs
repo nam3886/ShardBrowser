@@ -386,7 +386,7 @@ pub struct RunState {
     done: AtomicU32,
     total: AtomicU32,
     /// Its `jobs` row (0 until made).
-    pub(super) job: AtomicI64,
+    job: AtomicI64,
     /// "Stop after this account": checked between accounts only.
     pub stop: AtomicBool,
 }
@@ -440,11 +440,17 @@ pub async fn make_breeze<B: Browsers>(
     proxy_mode: &str,
     run: &RunState,
 ) -> Vec<Outcome> {
-    let job = match cx.db.job_create(KEY, count.into(), proxy_mode) {
-        Ok(j) => j,
-        Err(e) => return vec![failed(format!("{e:#}"))],
+    // `begin_job` made it already (the app's run); tests come without one.
+    let job = match run.job.load(SeqCst) {
+        0 => match cx.db.job_create(KEY, count.into(), proxy_mode) {
+            Ok(j) => {
+                run.job.store(j, SeqCst);
+                j
+            }
+            Err(e) => return vec![failed(format!("{e:#}"))],
+        },
+        j => j,
     };
-    run.job.store(job, SeqCst);
     let mut out = Vec::new();
     for _ in 0..count {
         if run.stop.load(SeqCst) {
@@ -526,6 +532,27 @@ impl Drop for EndRun {
     }
 }
 
+/// Begin `run` and make its `jobs` row at once, so the page's first
+/// `run_state` after Make already shows the job (and starts following it).
+pub fn begin_job(db: &Db, run: &RunState, count: u32, proxy_mode: &str) -> Result<i64> {
+    run.begin(count)?;
+    match db.job_create(KEY, count.into(), proxy_mode) {
+        Ok(j) => {
+            run.job.store(j, SeqCst);
+            Ok(j)
+        }
+        Err(e) => {
+            run.end();
+            Err(e)
+        }
+    }
+}
+
+/// Where failure screenshots go (`<account_id>.png`).
+pub fn screens_dir() -> Result<PathBuf> {
+    Ok(crate::store::local_root()?.join("creator").join("screens"))
+}
+
 /// The Ele client on the saved address and key.
 pub fn ele_client(db: &Arc<Db>) -> Result<EleClient> {
     let setting = |k| db.settings_get(k).map(Option::unwrap_or_default);
@@ -546,7 +573,7 @@ pub fn start(count: u32, proxy_mode: String) -> Result<()> {
     }
     let db = db()?;
     let ele = ele_client(&db)?;
-    let screens = crate::store::local_root()?.join("creator").join("screens");
+    let screens = screens_dir()?;
     let cx = Ctx {
         db,
         ele,
@@ -555,7 +582,7 @@ pub fn start(count: u32, proxy_mode: String) -> Result<()> {
         tm: Timings::default(),
         screens,
     };
-    RUN.begin(count)?;
+    begin_job(&cx.db, &RUN, count, &proxy_mode)?;
     tokio::spawn(async move {
         let _end = EndRun;
         make_breeze(&cx, count, &proxy_mode, &RUN).await;
