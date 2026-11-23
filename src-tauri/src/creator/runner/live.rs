@@ -196,7 +196,10 @@ async fn dev_bridge() {
                 Some(Err(e)) => json!({ "err": format!("{e:#}") }),
                 None => json!({ "err": format!("unknown creator command: {cmd}") }),
             };
-            ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, DEV_ORIGIN)], axum::Json(r))
+            (
+                [(header::ACCESS_CONTROL_ALLOW_ORIGIN, DEV_ORIGIN)],
+                axum::Json(r),
+            )
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:4795")
