@@ -989,7 +989,11 @@ mod tests {
         );
         assert_eq!(test_one(&db, Some(&ele), &ol, ele_ok).await, "active");
         assert_eq!(test_one(&db, Some(&ele), &ol, ele_404).await, "gone");
-        assert_eq!(test_one(&db, None, &ol, ele_ok).await, "failed", "Ele not set");
+        assert_eq!(
+            test_one(&db, None, &ol, ele_ok).await,
+            "failed",
+            "Ele not set"
+        );
         assert_eq!(test_one(&db, None, &ol, 999).await, "failed");
     }
 
