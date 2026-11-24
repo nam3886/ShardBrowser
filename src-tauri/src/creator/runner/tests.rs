@@ -826,49 +826,82 @@ async fn a_retry_on_an_ele_mailbox_is_not_judged_by_its_mail_dates() {
     assert_eq!(cx.browsers.opens.load(SeqCst), 1);
 }
 
-/// Until the first open's import ends, `db()` says so; a failed import is
-/// answered as is, never retried, until the app restarts.
+/// Python's database as it would sit at its old place: our app never reads it.
+fn python_place() -> std::path::PathBuf {
+    let local = crate::store::local_root().unwrap();
+    let dir = local.parent().unwrap().join("ghidorah-creator");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("ghidorah.sqlite")
+}
+
+fn files_beside(path: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// The manual cutover (D-M5-4): a copied v24 store opens as it is.
 #[test]
-fn db_reports_importing_then_the_same_failure() {
+fn db_opens_a_copied_python_store_as_it_is() {
     let _serial = crate::migrate::serial();
-    let _root = crate::store::test_root("creator-dbimport");
+    let _root = crate::store::test_root("creator-dbcopy");
     reset_db_for_test();
-    let python = store::python_db_path().unwrap();
-    std::fs::create_dir_all(python.parent().unwrap()).unwrap();
     let dest = store::db_path().unwrap();
-    let temps = || {
-        [".src", ".src-wal", ".import"]
-            .iter()
-            .any(|s| std::path::Path::new(&format!("{}{s}", dest.display())).exists())
-    };
-    let settled = || loop {
-        match db() {
-            Err(e) if e.to_string() == IMPORTING => std::thread::sleep(Duration::from_millis(20)),
-            r => return r,
-        }
-    };
-
-    let junk: Vec<u8> = (0..4096).map(|_| rand::random::<u8>()).collect();
-    std::fs::write(&python, junk).unwrap();
-    assert_eq!(db().err().expect("importing").to_string(), IMPORTING);
-    let failed = settled().err().expect("the import fails").to_string();
-    assert_ne!(failed, IMPORTING);
-    assert!(!dest.exists() && !temps());
-    // A retry would now open a fresh store: the same failure says none ran.
-    std::fs::remove_file(&python).unwrap();
-    assert_eq!(db().err().expect("still failed").to_string(), failed);
-    assert!(!dest.exists() && !temps());
-
-    reset_db_for_test();
     let fixture = store::python_fixture();
-    std::fs::copy(&fixture.0, &python).unwrap();
-    assert_eq!(db().err().expect("importing").to_string(), IMPORTING);
-    let db = settled().expect("imported");
+    rusqlite::Connection::open(&fixture.0)
+        .unwrap()
+        .execute_batch("DROP INDEX idx_mail_sender")
+        .unwrap();
+    std::fs::copy(&fixture.0, &dest).unwrap();
+    // Another v24 file at Python's old place, with no rows: never read.
+    drop(Db::open(&python_place()).unwrap());
+    let before = files_beside(&dest);
+
+    let db = db().expect("opened at the first call");
     let all = store::EmailQuery {
         limit: 100,
         ..Default::default()
     };
     assert_eq!(db.email_list(&all).unwrap()["total"], 3);
+    let c = rusqlite::Connection::open(&dest).unwrap();
+    let index: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_mail_sender'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let version: i64 = c
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!((index, version), (1, 24));
+    let new: Vec<String> = files_beside(&dest)
+        .into_iter()
+        .filter(|f| !before.contains(f))
+        .collect();
+    assert!(
+        new.iter()
+            .all(|f| f == "creator.sqlite-wal" || f == "creator.sqlite-shm"),
+        "{new:?}"
+    );
+    drop((c, db));
+    reset_db_for_test();
+}
+
+/// No store: a fresh v24 one at once, whatever sits at Python's old place.
+#[test]
+fn db_makes_a_fresh_store_when_none_is_there() {
+    let _serial = crate::migrate::serial();
+    let _root = crate::store::test_root("creator-dbfresh");
+    reset_db_for_test();
+    let fixture = store::python_fixture();
+    std::fs::copy(&fixture.0, python_place()).unwrap();
+    let db = db().expect("a fresh store at once");
+    assert_eq!(db.nav_counts().unwrap(), (0, 0, 0));
+    assert!(store::db_path().unwrap().exists());
     drop(db);
     reset_db_for_test();
 }

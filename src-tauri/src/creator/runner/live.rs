@@ -26,10 +26,9 @@
 //! With `CREATOR_LIVE_SAMPLE=N` and no `CREATOR_LIVE_OUTLOOK` it tests N random
 //! active Outlook mailboxes of the store that have no account instead.
 //!
-//! M4's import rehearsal (counts and timings only):
+//! M4's store checks (counts and timings only):
 //!
 //! ```text
-//! CREATOR_LIVE_IMPORT=<backup copy> CREATOR_LIVE_OUT=<new dir>   live_import
 //! CREATOR_LIVE_OUT=<dir>                                         live_perf (release build)
 //! CREATOR_LIVE_OUT=<dir> CREATOR_LIVE_SHARD_PROFILES=<profiles>  live_profiles_check
 //! CREATOR_TEST_BROWSER CREATOR_LIVE_FINGERPRINTS CREATOR_LIVE_OUT
@@ -285,30 +284,6 @@ async fn dev_bridge() {
         axum::serve(listener, app),
     )
     .await;
-}
-
-/// M4: the Python database (`CREATOR_LIVE_IMPORT`, a backup copy) imported
-/// into a new store in `CREATOR_LIVE_OUT`, as the app's first open does.
-#[test]
-#[ignore]
-fn live_import() {
-    let src = PathBuf::from(env("CREATOR_LIVE_IMPORT"));
-    assert!(src.is_file(), "CREATOR_LIVE_IMPORT is not a file");
-    let out = PathBuf::from(env("CREATOR_LIVE_OUT"));
-    std::fs::create_dir_all(&out).unwrap();
-    let dest = out.join("creator.sqlite");
-    if dest.exists() {
-        panic!("out already holds a store");
-    }
-    let started = std::time::Instant::now();
-    let (_db, report) = store::open_or_import(&dest, &src).unwrap();
-    let report = report.expect("an import");
-    eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
-    eprintln!(
-        "OPENED in {:.1}s (import {:.1}s)",
-        started.elapsed().as_secs_f64(),
-        report.seconds
-    );
 }
 
 /// Median of 5 runs of `f`, against the 300 ms budget.

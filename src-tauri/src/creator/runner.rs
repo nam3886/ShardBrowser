@@ -628,45 +628,20 @@ async fn make_rows_and_run<B: Browsers>(
     run_account(cx, id).await
 }
 
-enum DbState {
-    Ready(Arc<Db>),
-    Importing,
-    Failed(String),
-}
+static DB: Mutex<Option<Arc<Db>>> = Mutex::new(None);
 
-static DB: Mutex<Option<DbState>> = Mutex::new(None);
-
-/// What every page call answers while the first open imports Python's database.
-pub const IMPORTING: &str = "Importing the Python database…";
-
-/// Our store (`store::db_path`), opened once. The first open with no store
-/// and Python's database at its place imports it (`store::open_or_import`) on
-/// a thread of its own; meanwhile, and after a failure until the app restarts,
-/// every call gets the state's error.
+/// Our store (`store::db_path`), opened once; a missing file becomes a fresh
+/// v24 store. A copied Python `ghidorah.sqlite` opens as it is (the cutover
+/// is a file copy, D-M5-4). An open error is returned and the next call
+/// tries again.
 pub fn db() -> Result<Arc<Db>> {
     let mut g = DB.lock().unwrap_or_else(|e| e.into_inner());
-    match &*g {
-        Some(DbState::Ready(db)) => return Ok(db.clone()),
-        Some(DbState::Importing) => bail!(IMPORTING),
-        Some(DbState::Failed(t)) => bail!("{t}"),
-        None => {}
+    if let Some(db) = &*g {
+        return Ok(db.clone());
     }
-    let path = store::db_path()?;
-    let python = store::python_db_path()?;
-    if path.try_exists()? || !python.try_exists()? {
-        let db = Arc::new(Db::open(&path)?);
-        *g = Some(DbState::Ready(db.clone()));
-        return Ok(db);
-    }
-    *g = Some(DbState::Importing);
-    std::thread::spawn(move || {
-        let state = match store::open_or_import(&path, &python) {
-            Ok((db, _)) => DbState::Ready(Arc::new(db)),
-            Err(e) => DbState::Failed(format!("{e:#}")),
-        };
-        *DB.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
-    });
-    bail!(IMPORTING)
+    let db = Arc::new(Db::open(&store::db_path()?)?);
+    *g = Some(db.clone());
+    Ok(db)
 }
 
 /// Forget the store, so a test's next `db()` opens its own.
