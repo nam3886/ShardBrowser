@@ -8,8 +8,7 @@ import { RefreshIcon } from "../../shared/icons";
 import { LoadError, LoadingRows } from "../../shared/ui/ListStates";
 import { PeekBody, PeekHeader, PeekPanel, PeekSection, PropertyRow, PropertySheet, PropertyValue } from "../../shared/ui/peek";
 import { fmtTs } from "../../shared/lib/utils";
-import { toast } from "../../shared/model/toast";
-import { call } from "../api";
+import { call, MOCK } from "../api";
 import { useCt } from "../i18n";
 import type { EmailDetail, EmailRow, MailMessage } from "../types";
 import { AccountPill, CopyValue, PlatformMark, platformLabel, ProfileLink, useCall } from "./parts";
@@ -18,31 +17,37 @@ export function EmailPeek({ email, onClose }: { email: EmailRow | null; onClose:
   const ct = useCt();
   const presence = usePresence(email?.id ?? null, { maxExitMs: 250 });
   const m = useLatched(email);
+  // Refresh reads the inbox again (the `email` call polls it first).
+  const [rev, setRev] = useState(0);
+  // The badge follows what the Peek's own read found (a refresh can find it gone).
+  const [read, setRead] = useState<{ id: number; status: EmailRow["status"] } | null>(null);
   if (!presence.mounted || !m) return null;
+  const status = read?.id === m.id ? read.status : m.status;
   return (
     <PeekPanel kind="profile" label={ct("creator.emailPeek.label", { email: m.email })} presence={presence}>
       <PeekHeader
         subject={String(m.id)}
         title={<h2 className="m-0 min-w-0 truncate text-panel-title text-text-strong-950">{m.email}</h2>}
-        status={<Badge color={m.status === "gone" ? "error" : "gray"} size="small">{ct(`creator.emailState.${m.status}`)}</Badge>}
+        status={<Badge color={status === "gone" ? "error" : "gray"} size="small">{ct(`creator.emailState.${status}`)}</Badge>}
         primary={(
-          <Button variant="primary" mode="lighter" size="3xsmall" leftIcon={<RefreshIcon className="size-3.5" />} onClick={() => toast.info(ct("creator.emailPeek.refreshed"))}>
+          <Button variant="primary" mode="lighter" size="3xsmall" leftIcon={<RefreshIcon className="size-3.5" />} onClick={() => setRev((r) => r + 1)}>
             {ct("creator.emailPeek.refresh")}
           </Button>
         )}
-        menuItems={[{ label: ct("creator.action.export"), onSelect: () => {} }, { type: "separator" }, { label: ct("creator.action.delete"), danger: true, onSelect: () => {} }]}
+        menuItems={MOCK ? [{ label: ct("creator.action.export"), onSelect: () => {} }, { type: "separator" }, { label: ct("creator.action.delete"), danger: true, onSelect: () => {} }] : undefined}
         menuLabel={ct("creator.peek.more")}
         closeLabel={ct("creator.peek.close")}
         onClose={onClose}
       />
-      <Body key={m.id} id={m.id} />
+      <Body key={`${m.id}:${rev}`} id={m.id} rev={rev} onRead={setRead} />
     </PeekPanel>
   );
 }
 
-function Body({ id }: { id: number }) {
+function Body({ id, rev, onRead }: { id: number; rev: number; onRead: (r: { id: number; status: EmailRow["status"] }) => void }) {
   const ct = useCt();
-  const { data, error, status, reload } = useCall<EmailDetail>("email", { id }, String(id));
+  const { data, error, status, reload } = useCall<EmailDetail>("email", { id }, `${id}:${rev}`);
+  useEffect(() => { if (data) onRead({ id: data.id, status: data.status }); }, [data, onRead]);
   if (status === "loading") return <PeekBody><div className="p-inset"><LoadingRows rows={5} /></div></PeekBody>;
   if (status === "error" || !data) return <PeekBody><LoadError what={ct("creator.emails.what")} error={error} onRetry={reload} headingLevel={3} /></PeekBody>;
   const row = (rid: string, label: string, value: React.ReactNode, empty = false, o: { copy?: React.ReactNode } = {}) => (
@@ -111,7 +116,8 @@ function MailList({ id, first, more: firstMore }: { id: number; first: MailMessa
     const io = new IntersectionObserver(([e]) => {
       if (!e.isIntersecting || busy) return;
       setBusy(true);
-      void call<{ items: MailMessage[]; more: boolean }>("email_mail", { id, offset: items.length })
+      // Older than the last one shown (a cursor: new mail on top never shifts it).
+      void call<{ items: MailMessage[]; more: boolean }>("email_mail", { id, before_id: items[items.length - 1]?.id })
         .then((r) => { setItems((x) => [...x, ...r.items]); setMore(r.more); }, () => setMore(false))
         .finally(() => setBusy(false));
     });

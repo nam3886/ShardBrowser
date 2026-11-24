@@ -120,15 +120,34 @@ pub fn parse_iso(s: &str) -> Option<i64> {
     Some(secs * 1_000_000 + micros)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Mailbox {
     pub id: i64,
     pub provider: String,
     pub email: String,
     pub domain: String,
+    /// Ele's mailbox token or Outlook's refresh token: a secret.
     pub token: String,
     pub status: String,
     pub created_at: String,
+    /// Outlook's OAuth client id: a secret.
+    pub client_id: Option<String>,
+}
+
+/// The token and the client id print as `***`.
+impl std::fmt::Debug for Mailbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mailbox")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("email", &self.email)
+            .field("domain", &self.domain)
+            .field("token", &"***")
+            .field("status", &self.status)
+            .field("created_at", &self.created_at)
+            .field("client_id", &self.client_id.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +172,56 @@ pub struct NewMail {
     pub body: String,
     pub html: Option<String>,
     pub received_at: Option<String>,
+}
+
+/// One Outlook combo line, without its password and recovery address
+/// (never stored).
+#[derive(Clone, PartialEq)]
+pub struct OutlookLine {
+    pub email: String,
+    pub token: String,
+    pub client_id: String,
+    pub domain: String,
+}
+
+/// What an Outlook paste did: rows added, duplicate line numbers (already
+/// stored or earlier in the paste), unreadable lines with the reason.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OutlookImport {
+    pub added: usize,
+    pub duplicates: Vec<usize>,
+    pub invalid: Vec<(usize, &'static str)>,
+}
+
+pub const OUTLOOK_LINE: &str = "not email|password|refresh_token|client_id|recovery";
+
+/// Outlook combo lines `email|password|refresh_token|client_id|recovery`
+/// (Python `outlook._parse`): 1-based line numbers counting blank lines,
+/// each part trimmed; the password and recovery are dropped.
+pub fn parse_outlook(text: &str) -> (Vec<(usize, OutlookLine)>, Vec<(usize, &'static str)>) {
+    let (mut valid, mut invalid) = (Vec::new(), Vec::new());
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let p: Vec<&str> = line.split('|').map(str::trim).collect();
+        let domain = p[0].split_once('@').map_or("", |(_, d)| d);
+        if p.len() != 5 || domain.is_empty() || p[2].is_empty() || p[3].is_empty() {
+            invalid.push((i + 1, OUTLOOK_LINE));
+            continue;
+        }
+        valid.push((
+            i + 1,
+            OutlookLine {
+                email: p[0].to_string(),
+                token: p[2].to_string(),
+                client_id: p[3].to_string(),
+                domain: domain.to_string(),
+            },
+        ));
+    }
+    (valid, invalid)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +302,31 @@ pub struct AccountQuery {
     pub limit: i64,
 }
 
+/// The Emails list's filters (`email_list`, `email_ids`).
+#[derive(Debug, Clone, Default)]
+pub struct EmailQuery {
+    /// `outlook` | `ele`.
+    pub kind: Option<String>,
+    /// `active` | `gone`.
+    pub status: Option<String>,
+    /// A platform key: only `breezeblue` has free emails so far.
+    pub free_for: Option<String>,
+    pub q: String,
+    /// `newest` (default), `oldest`, `email`.
+    pub order: String,
+    pub offset: i64,
+    pub limit: i64,
+}
+
+type MailCounts = std::collections::HashMap<i64, i64>;
+type AccountsOf = std::collections::HashMap<i64, Vec<serde_json::Value>>;
+
+/// Account states a run is on (Python `engine.LIVE`).
+pub const LIVE: [&str; 3] = ["queued", "running", "waiting"];
+
+/// Python `MAIL_PAGE`: mails per Peek page.
+pub const MAIL_PAGE: i64 = 50;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub id: i64,
@@ -254,7 +348,7 @@ pub struct ImportCounts {
 /// The settings `import_basics` takes from a Python database.
 const IMPORTED_SETTINGS: [&str; 3] = ["ele_api_url", "ele_api_key", "proxy_rest_seconds"];
 
-const MAILBOX: &str = "id, provider, email, domain, token, status, created_at";
+const MAILBOX: &str = "id, provider, email, domain, token, status, created_at, client_id";
 const MAIL: &str =
     "id, mailbox_id, ele_message_id, sender, subject, body, otp_extracted, received_at, html";
 const PROXY: &str = "id, host, port, username, password, active, status, last_used_at, refused_at, kind, signups_ok, signups_total";
@@ -271,6 +365,7 @@ fn mailbox(r: &Row) -> rusqlite::Result<Mailbox> {
         token: r.get(4)?,
         status: r.get(5)?,
         created_at: r.get(6)?,
+        client_id: r.get(7)?,
     })
 }
 
@@ -517,6 +612,144 @@ impl Db {
         Ok(())
     }
 
+    /// Outlook combos (Python `import_outlook`), in one transaction: the
+    /// addresses already stored are found through the email index from a
+    /// temp table (never the whole table), then each new line is inserted.
+    /// Email match is exact, as Python's.
+    pub fn import_outlook(&self, text: &str) -> Result<OutlookImport> {
+        let (valid, invalid) = parse_outlook(text);
+        let mut c = self.c();
+        // An error rolls the transaction back, the temp table with it.
+        let tx = c.transaction()?;
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS _imp (email TEXT); DELETE FROM temp._imp;",
+        )?;
+        {
+            let mut ins = tx.prepare("INSERT INTO temp._imp VALUES (?)")?;
+            for (_, l) in &valid {
+                ins.execute([&l.email])?;
+            }
+        }
+        let mut known: HashSet<String> = tx
+            .prepare("SELECT email FROM mailboxes WHERE email IN (SELECT email FROM temp._imp)")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        tx.execute_batch("DROP TABLE temp._imp")?;
+        let mut out = OutlookImport {
+            invalid,
+            ..Default::default()
+        };
+        {
+            let mut ins = tx.prepare(
+                "INSERT INTO mailboxes (provider, email, domain, token, status, client_id, created_at) \
+                 VALUES ('outlook', ?, ?, ?, 'active', ?, ?)",
+            )?;
+            let ts = now();
+            for (n, l) in valid {
+                if !known.insert(l.email.clone()) {
+                    out.duplicates.push(n);
+                    continue;
+                }
+                ins.execute(params![l.email, l.domain, l.token, l.client_id, ts])?;
+                out.added += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// The WHERE (alias `m`) of the Outlook mailboxes free for a Breeze Blue
+    /// account (Python `_email_conds` + `_taken` for the email route, the
+    /// provider fixed to Outlook): active, domain not blocked, a token and a
+    /// client id, no Breeze account made, in progress or frozen on it, and
+    /// none failed with a code no retry fixes.
+    /// A mailbox holding mail from the platform's domains is used for it
+    /// already (owner, 2026-11-24): never free for it.
+    // ponytail: no count cache (Python caches by table revisions), and the
+    // platform-mail rule scans the mail table's senders (~0.5 s at 400k mails
+    // in a debug build); a stored "used for" flag or a revision cache if the
+    // Make dialog feels it.
+    pub fn breeze_free_outlook_where() -> (String, Vec<rusqlite::types::Value>) {
+        use rusqlite::types::Value as V;
+        let key = super::providers::breezeblue::KEY;
+        let fatal = super::errors::NOT_RETRYABLE;
+        let (mail, mail_args) = platform_mail_cond(key);
+        let sql = format!(
+            "m.provider='outlook' AND m.status='active' \
+             AND lower(m.domain) NOT IN (SELECT domain FROM blocked_domains) \
+             AND m.token<>'' AND COALESCE(m.client_id,'')<>'' \
+             AND m.id NOT IN (SELECT mailbox_id FROM accounts WHERE platform=? \
+             AND ((status<>'failed' OR frozen=1) OR (status='failed' AND error_code IN ({})))) \
+             AND m.id NOT IN (SELECT x.mailbox_id FROM mail_messages x WHERE {mail})",
+            vec!["?"; fatal.len()].join(",")
+        );
+        let mut args = vec![V::Text(key.into())];
+        args.extend(fatal.iter().map(|c| V::Text((*c).into())));
+        args.extend(mail_args);
+        (sql, args)
+    }
+
+    /// Whether the mailbox holds mail from `platform`'s domains; with
+    /// `before`, only mail received before it (an account's own run brings
+    /// the platform's mail after the account was made). Undated mail counts
+    /// only without `before`.
+    pub fn has_platform_mail(
+        &self,
+        mailbox_id: i64,
+        platform: &str,
+        before: Option<&str>,
+    ) -> Result<bool> {
+        let (cond, mut args) = platform_mail_cond(platform);
+        args.insert(0, rusqlite::types::Value::Integer(mailbox_id));
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT x.received_at FROM mail_messages x WHERE x.mailbox_id=? AND {cond}"
+        ))?;
+        let dates: Vec<Option<String>> = st
+            .query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let Some(before) = before.and_then(parse_iso) else {
+            return Ok(!dates.is_empty());
+        };
+        Ok(dates
+            .iter()
+            .any(|d| d.as_deref().and_then(parse_iso).is_some_and(|t| t < before)))
+    }
+
+    /// Free Outlook mailboxes for Breeze Blue after mailbox `after_id`,
+    /// oldest first (a run walks them with this cursor).
+    pub fn breeze_free_outlook(&self, after_id: i64, limit: i64) -> Result<Vec<i64>> {
+        let (w, mut args) = Self::breeze_free_outlook_where();
+        args.push(rusqlite::types::Value::Integer(after_id));
+        args.push(rusqlite::types::Value::Integer(limit));
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT m.id FROM mailboxes m WHERE {w} AND m.id>? ORDER BY m.id LIMIT ?"
+        ))?;
+        let ids = st
+            .query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
+    pub fn breeze_free_outlook_count(&self) -> Result<i64> {
+        let (w, args) = Self::breeze_free_outlook_where();
+        Ok(self.c().query_row(
+            &format!("SELECT COUNT(*) FROM mailboxes m WHERE {w}"),
+            rusqlite::params_from_iter(&args),
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Outlook's rotated refresh token.
+    pub fn mailbox_set_token(&self, id: i64, token: &str) -> Result<()> {
+        self.c().execute(
+            "UPDATE mailboxes SET token=? WHERE id=?",
+            params![token, id],
+        )?;
+        Ok(())
+    }
+
     pub fn mail_list(&self, mailbox_id: i64) -> Result<Vec<MailMessage>> {
         let c = self.c();
         let mut st = c.prepare(&format!(
@@ -529,16 +762,26 @@ impl Db {
     }
 
     pub fn mail_create(&self, mailbox_id: i64, m: &NewMail) -> Result<MailMessage> {
+        self.mail_add(mailbox_id, m)?
+            .ok_or_else(|| anyhow::anyhow!("mail already stored"))
+    }
+
+    /// Stores a mail unless one with its message id is stored already (two
+    /// polls of one mailbox at once, `ux_mail_msg_id`): None then.
+    pub fn mail_add(&self, mailbox_id: i64, m: &NewMail) -> Result<Option<MailMessage>> {
         let c = self.c();
-        c.execute(
-            "INSERT INTO mail_messages (mailbox_id, ele_message_id, sender, subject, body, html, received_at, stored_at) VALUES (?,?,?,?,?,?,?,?)",
+        let n = c.execute(
+            "INSERT OR IGNORE INTO mail_messages (mailbox_id, ele_message_id, sender, subject, body, html, received_at, stored_at) VALUES (?,?,?,?,?,?,?,?)",
             params![mailbox_id, m.ele_message_id, m.sender, m.subject, m.body, m.html, m.received_at, now()],
         )?;
-        Ok(c.query_row(
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(c.query_row(
             &format!("SELECT {MAIL} FROM mail_messages WHERE id=?"),
             [c.last_insert_rowid()],
             mail,
-        )?)
+        )?))
     }
 
     pub fn mail_update_body(&self, id: i64, body: &str) -> Result<()> {
@@ -635,6 +878,36 @@ impl Db {
             params![mailbox_id, platform, route, job_id, ts, ts],
         )?;
         Ok(c.last_insert_rowid())
+    }
+
+    /// A new account row on the mailbox, or its failed one for the platform
+    /// queued again in place (Python `planner._queue`: one row per mailbox,
+    /// platform and dedupe key; id, secrets and extra kept).
+    pub fn account_queue(
+        &self,
+        mailbox_id: i64,
+        platform: &str,
+        route: &str,
+        job_id: Option<i64>,
+    ) -> Result<i64> {
+        let failed: Option<i64> = self
+            .c()
+            .query_row(
+                "SELECT id FROM accounts WHERE mailbox_id=? AND platform=? AND dedupe_key='' AND status='failed'",
+                params![mailbox_id, platform],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(id) = failed else {
+            return self.account_create(mailbox_id, platform, route, job_id);
+        };
+        self.c().execute(
+            "UPDATE accounts SET status='queued', route=?, job_id=?, error=NULL, error_code=NULL, step=NULL, \
+             step_note=NULL, retry_count=0, retry_at=NULL, screenshot=NULL, started_at=NULL, finished_at=NULL, \
+             updated_at=? WHERE id=?",
+            params![route, job_id, now(), id],
+        )?;
+        Ok(id)
     }
 
     pub fn account_get(&self, id: i64) -> Result<Option<Account>> {
@@ -844,6 +1117,204 @@ impl Db {
         )
     }
 
+    /// The WHERE (alias `m`) of the Emails filters but type.
+    fn email_where(f: &EmailQuery) -> (String, Vec<rusqlite::types::Value>) {
+        use rusqlite::types::Value as V;
+        let mut wh = vec!["1=1".to_string()];
+        let mut args: Vec<V> = Vec::new();
+        if let Some(s) = &f.status {
+            wh.push("m.status=?".into());
+            args.push(V::Text(s.clone()));
+        }
+        match f.free_for.as_deref() {
+            None => {}
+            Some(super::providers::breezeblue::KEY) => {
+                let (w, a) = Self::breeze_free_outlook_where();
+                wh.push(format!("({w})"));
+                args.extend(a);
+            }
+            // No other platform is made yet: nothing is free for it.
+            Some(_) => wh.push("0".into()),
+        }
+        let q = f.q.trim();
+        if !q.is_empty() {
+            let esc = q
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            wh.push("m.email LIKE ? ESCAPE '\\'".into());
+            args.push(V::Text(format!("%{esc}%")));
+        }
+        (wh.join(" AND "), args)
+    }
+
+    /// One window of the Emails list (`EmailList` in `src/creator/types.ts`):
+    /// the rows (never a token or client id), the total under the filters,
+    /// the count per type (every filter but type, one `GROUP BY`). Mail
+    /// counts and accounts are read for the window's ids only.
+    pub fn email_list(&self, f: &EmailQuery) -> Result<serde_json::Value> {
+        use rusqlite::types::Value as V;
+        use serde_json::json;
+        let (wh, mut args) = Self::email_where(f);
+        let c = self.c();
+        let mut counts = json!({ "all": 0, "outlook": 0, "ele": 0 });
+        {
+            let mut st = c.prepare(&format!(
+                "SELECT m.provider, COUNT(*) FROM mailboxes m WHERE {wh} GROUP BY 1"
+            ))?;
+            let mut rows = st.query(rusqlite::params_from_iter(&args))?;
+            let mut all = 0;
+            while let Some(r) = rows.next()? {
+                let (k, n): (String, i64) = (r.get(0)?, r.get(1)?);
+                all += n;
+                if counts.get(&k).is_some() {
+                    counts[k] = n.into();
+                }
+            }
+            counts["all"] = all.into();
+        }
+        let mut wh = wh;
+        let total = match &f.kind {
+            Some(k) => {
+                wh.push_str(" AND m.provider=?");
+                args.push(V::Text(k.clone()));
+                counts.get(k).and_then(|v| v.as_i64()).unwrap_or(0)
+            }
+            None => counts["all"].as_i64().unwrap_or(0),
+        };
+        let order = match f.order.as_str() {
+            "oldest" => "m.id",
+            "email" => "m.email, m.id",
+            _ => "m.id DESC",
+        };
+        args.push(V::Integer(f.limit));
+        args.push(V::Integer(f.offset));
+        let rows: Vec<(i64, String, String, String, String)> = c
+            .prepare(&format!(
+                "SELECT m.id, m.email, m.provider, m.status, m.created_at FROM mailboxes m \
+                 WHERE {wh} ORDER BY {order} LIMIT ? OFFSET ?"
+            ))?
+            .query_map(rusqlite::params_from_iter(&args), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+        let (mails, accounts) = Self::mails_and_accounts(&c, &ids)?;
+        let items: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(id, email, provider, status, created_at)| {
+                json!({
+                    "id": id, "email": email, "provider": provider, "status": status,
+                    "mails": mails.get(&id).copied().unwrap_or(0), "created_at": created_at,
+                    "accounts": accounts.get(&id).cloned().unwrap_or_default(),
+                })
+            })
+            .collect();
+        Ok(json!({ "items": items, "total": total, "offset": f.offset, "counts": counts }))
+    }
+
+    /// Mail count and accounts (`{platform, status, verify_status}`, oldest
+    /// first) of these mailboxes.
+    fn mails_and_accounts(c: &Connection, ids: &[i64]) -> Result<(MailCounts, AccountsOf)> {
+        let (mut mails, mut accounts) = (MailCounts::new(), AccountsOf::new());
+        if ids.is_empty() {
+            return Ok((mails, accounts));
+        }
+        let marks = vec!["?"; ids.len()].join(",");
+        let mut st = c.prepare(&format!(
+            "SELECT mailbox_id, COUNT(*) FROM mail_messages WHERE mailbox_id IN ({marks}) GROUP BY mailbox_id"
+        ))?;
+        let mut rows = st.query(rusqlite::params_from_iter(ids))?;
+        while let Some(r) = rows.next()? {
+            mails.insert(r.get(0)?, r.get(1)?);
+        }
+        let mut st = c.prepare(&format!(
+            "SELECT mailbox_id, platform, status, verify_status FROM accounts WHERE mailbox_id IN ({marks}) ORDER BY id"
+        ))?;
+        let mut rows = st.query(rusqlite::params_from_iter(ids))?;
+        while let Some(r) = rows.next()? {
+            let v = serde_json::json!({
+                "platform": r.get::<_, String>(1)?,
+                "status": r.get::<_, String>(2)?,
+                "verify_status": r.get::<_, Option<String>>(3)?,
+            });
+            accounts.entry(r.get(0)?).or_insert_with(Vec::new).push(v);
+        }
+        Ok((mails, accounts))
+    }
+
+    /// One mailbox as an `EmailRow` (no token, no client id); None when gone.
+    pub fn email_row(&self, id: i64) -> Result<Option<serde_json::Value>> {
+        let Some(mb) = self.mailbox_get(id)? else {
+            return Ok(None);
+        };
+        let (mails, accounts) = Self::mails_and_accounts(&self.c(), &[id])?;
+        Ok(Some(serde_json::json!({
+            "id": mb.id, "email": mb.email, "provider": mb.provider, "status": mb.status,
+            "mails": mails.get(&id).copied().unwrap_or(0), "created_at": mb.created_at,
+            "accounts": accounts.get(&id).cloned().unwrap_or_default(),
+        })))
+    }
+
+    /// Every id matching the filters (type included), for "Test all" and
+    /// select-all: ids only.
+    pub fn email_ids(&self, f: &EmailQuery) -> Result<Vec<i64>> {
+        let (mut wh, mut args) = Self::email_where(f);
+        if let Some(k) = &f.kind {
+            wh.push_str(" AND m.provider=?");
+            args.push(rusqlite::types::Value::Text(k.clone()));
+        }
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT m.id FROM mailboxes m WHERE {wh} ORDER BY m.id"
+        ))?;
+        let ids = st
+            .query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
+    /// Whether a run is on an account of this mailbox (it polls the inbox itself).
+    pub fn mailbox_busy(&self, id: i64) -> Result<bool> {
+        Ok(self.c().query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE mailbox_id=? AND status IN ('{}'))",
+                LIVE.join("','")
+            ),
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The newest `MAIL_PAGE` stored mails of a mailbox, older than
+    /// `before_id` when given (Python `_mail_page`'s cursor: new mail landing
+    /// on top never shifts or repeats a row), and whether more remain.
+    pub fn email_mail_page(
+        &self,
+        mailbox_id: i64,
+        before_id: Option<i64>,
+    ) -> Result<(Vec<MailMessage>, bool)> {
+        let c = self.c();
+        let mut sql = format!("SELECT {MAIL} FROM mail_messages WHERE mailbox_id=?1");
+        if before_id.is_some() {
+            sql.push_str(
+                " AND (COALESCE(received_at, ''), id) < (SELECT COALESCE(received_at, ''), id \
+                 FROM mail_messages WHERE id=?2 AND mailbox_id=?1)",
+            );
+        }
+        sql.push_str(" ORDER BY COALESCE(received_at, '') DESC, id DESC LIMIT ?3");
+        let mut st = c.prepare(&sql)?;
+        let mut rows: Vec<MailMessage> = st
+            .query_map(
+                params![mailbox_id, before_id.unwrap_or(0), MAIL_PAGE + 1],
+                mail,
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        let more = rows.len() as i64 > MAIL_PAGE;
+        rows.truncate(MAIL_PAGE as usize);
+        Ok((rows, more))
+    }
+
     /// A Make run's progress: linked and failed accounts of `job`, and the
     /// step note of the one running now.
     pub fn job_progress(&self, job: i64) -> Result<(i64, i64, Option<String>)> {
@@ -895,6 +1366,27 @@ impl Db {
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
     }
+}
+
+/// `(sender LIKE …)` on alias `x` for the platform's mail domains: a sender
+/// ending in an address at the domain or a subdomain, bare (Outlook) or as
+/// `Name <addr>` (Ele); false for a platform with none.
+fn platform_mail_cond(platform: &str) -> (String, Vec<rusqlite::types::Value>) {
+    let domains = super::providers::mail_domains(platform);
+    if domains.is_empty() {
+        return ("0".into(), vec![]);
+    }
+    let mut args = Vec::new();
+    for d in domains {
+        let d = d.replace('%', "").replace('_', "");
+        for p in [format!("%@{d}"), format!("%.{d}")] {
+            args.push(rusqlite::types::Value::Text(p.clone()));
+            args.push(rusqlite::types::Value::Text(format!("{p}>")));
+        }
+    }
+    // SQLite's LIKE ignores ASCII case already.
+    let likes = vec!["x.sender LIKE ?"; args.len()].join(" OR ");
+    (format!("({likes})"), args)
 }
 
 /// Seed a fresh database from a Python one (D7, M2): proxies (one already
@@ -967,6 +1459,18 @@ impl Db {
     /// A test sets a column no row function writes.
     pub(crate) fn exec_for_test(&self, sql: &str) {
         self.c().execute_batch(sql).unwrap();
+    }
+
+    /// The messages of a mailbox's events, oldest first.
+    pub(crate) fn events_of_mailbox_for_test(&self, mailbox_id: i64) -> Vec<String> {
+        let c = self.c();
+        let mut st = c
+            .prepare("SELECT message FROM events WHERE mailbox_id=? ORDER BY id")
+            .unwrap();
+        st.query_map([mailbox_id], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 }
 
@@ -1210,5 +1714,200 @@ mod tests {
             .unwrap();
         assert_eq!(db.events_of(id).unwrap().len(), 1);
         assert_eq!(db.accounts_recent("breezeblue", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_mail_stored_twice_by_message_id_is_kept_once() {
+        let (db, _f) = temp_db();
+        let mb = db
+            .mailbox_create("outlook", "a@outlook.example", "outlook.example", "T")
+            .unwrap();
+        let m = NewMail {
+            ele_message_id: Some("M1".into()),
+            ..Default::default()
+        };
+        assert!(db.mail_add(mb.id, &m).unwrap().is_some());
+        // The other poll got there first: skipped, no error.
+        assert!(db.mail_add(mb.id, &m).unwrap().is_none());
+        assert_eq!(db.mail_list(mb.id).unwrap().len(), 1);
+        // No message id: never a duplicate by id.
+        let bare = NewMail::default();
+        assert!(db.mail_add(mb.id, &bare).unwrap().is_some());
+        assert!(db.mail_add(mb.id, &bare).unwrap().is_some());
+    }
+
+    #[test]
+    fn platform_mail_is_matched_by_the_sender_domain_only() {
+        let (db, _f) = temp_db();
+        let has = |sender: &str| {
+            let mb = db
+                .mailbox_create(
+                    "outlook",
+                    &format!("{}@o.example", uuid::Uuid::new_v4().simple()),
+                    "o.example",
+                    "T",
+                )
+                .unwrap();
+            let m = NewMail {
+                sender: sender.into(),
+                ..Default::default()
+            };
+            db.mail_create(mb.id, &m).unwrap();
+            db.has_platform_mail(mb.id, "breezeblue", None).unwrap()
+        };
+        for yes in [
+            "noreply@breezeblue.ai",
+            "NoReply@BreezeBlue.AI",
+            "Breeze Blue <noreply@breezeblue.ai>",
+            "hi@mail.breezeblue.ai",
+        ] {
+            assert!(has(yes), "{yes}");
+        }
+        for no in [
+            "a@notbreezeblue.ai",
+            "a@breezeblue.ai.evil.example",
+            "john.breezeblue.ai@gmail.example",
+            "Breeze Blue <a@gmail.example>",
+        ] {
+            assert!(!has(no), "{no}");
+        }
+        let mb = db
+            .mailbox_create("outlook", "x@o.example", "o.example", "T")
+            .unwrap();
+        let m = NewMail {
+            sender: "john.x.ai@gmail.example".into(),
+            ..Default::default()
+        };
+        db.mail_create(mb.id, &m).unwrap();
+        assert!(!db.has_platform_mail(mb.id, "grok", None).unwrap());
+    }
+
+    #[test]
+    fn parse_valid() {
+        let (valid, invalid) = parse_outlook("a@outlook.example|pw|M.Ctok|cid-uuid|rec@x.example");
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+        let (n, l) = &valid[0];
+        assert_eq!(
+            (
+                *n,
+                l.email.as_str(),
+                l.token.as_str(),
+                l.client_id.as_str(),
+                l.domain.as_str()
+            ),
+            (
+                1,
+                "a@outlook.example",
+                "M.Ctok",
+                "cid-uuid",
+                "outlook.example"
+            )
+        );
+    }
+
+    #[test]
+    fn parse_invalid() {
+        let text =
+            "a|b|c\n\nnoat|pw|t|c|r\na@x.example|pw||c|r\na@x.example|pw|t||r\n b@ |pw|t|c|r";
+        let (valid, invalid) = parse_outlook(text);
+        assert!(valid.is_empty());
+        assert_eq!(
+            invalid.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            [1, 3, 4, 5, 6]
+        );
+        assert!(invalid.iter().all(|(_, r)| *r == OUTLOOK_LINE));
+    }
+
+    #[test]
+    fn import_creates_rows() {
+        let (db, _f) = temp_db();
+        let r = db
+            .import_outlook("a@outlook.example|pw|T1|C1|r\nb@hotmail.example|pw|T2|C2|r")
+            .unwrap();
+        assert_eq!(r.added, 2);
+        let m = db.mailbox_get(1).unwrap().unwrap();
+        assert_eq!(
+            (
+                m.provider.as_str(),
+                m.status.as_str(),
+                m.token.as_str(),
+                m.client_id.as_deref(),
+                m.domain.as_str()
+            ),
+            ("outlook", "active", "T1", Some("C1"), "outlook.example")
+        );
+    }
+
+    #[test]
+    fn import_dedup() {
+        let (db, _f) = temp_db();
+        db.import_outlook("a@outlook.example|pw|T1|C1|r").unwrap();
+        let r = db
+            .import_outlook("a@outlook.example|pw|T1|C1|r\nb@outlook.example|pw|T|C|r\nb@outlook.example|pw|T|C|r")
+            .unwrap();
+        assert_eq!((r.added, r.duplicates), (1, vec![1, 3]));
+    }
+
+    #[test]
+    fn import_dedupes_in_paste_and_against_store_at_40k() {
+        let (db, _f) = temp_db();
+        let line = |i: usize| format!("u{i}@outlook.example|pw|T{i}|C|r");
+        let stored: Vec<String> = (0..3000).map(line).collect();
+        assert_eq!(db.import_outlook(&stored.join("\n")).unwrap().added, 3000);
+        // 39,400 distinct (3,000 of them stored), 500 repeats, 100 bad lines.
+        let mut lines: Vec<String> = (0..39_400).map(line).collect();
+        lines.extend((0..500).map(|i| line(38_000 + i)));
+        lines.extend((0..100).map(|i| format!("bad line {i}")));
+        assert_eq!(lines.len(), 40_000);
+        let t = std::time::Instant::now();
+        let r = db.import_outlook(&lines.join("\n")).unwrap();
+        let took = t.elapsed();
+        eprintln!("import of 40,000 lines: {took:?}");
+        assert_eq!(
+            (r.added, r.duplicates.len(), r.invalid.len()),
+            (36_400, 3_500, 100)
+        );
+        assert_eq!(r.duplicates[0], 1);
+        assert_eq!(r.invalid[0].0, 39_901);
+        assert!(took < Duration::from_secs(5), "{took:?}");
+    }
+
+    #[test]
+    fn import_leaves_no_temp_table() {
+        let (db, _f) = temp_db();
+        db.import_outlook("a@outlook.example|pw|T1|C1|r").unwrap();
+        let n: i64 = db
+            .c()
+            .query_row(
+                "SELECT COUNT(*) FROM temp.sqlite_master WHERE name='_imp'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn password_and_recovery_never_stored() {
+        let (db, _f) = temp_db();
+        db.import_outlook("a@outlook.example|PWSECRET9|T1|C1|RECSECRET9@x.example")
+            .unwrap();
+        let c = db.c();
+        let mut st = c.prepare("SELECT * FROM mailboxes").unwrap();
+        let cols = st.column_count();
+        let mut rows = st.query([]).unwrap();
+        let mut all = String::new();
+        while let Some(r) = rows.next().unwrap() {
+            for i in 0..cols {
+                let v: rusqlite::types::Value = r.get(i).unwrap();
+                all.push_str(&format!("{v:?}|"));
+            }
+        }
+        assert!(all.contains("T1"), "{all}");
+        assert!(
+            !all.contains("PWSECRET9") && !all.contains("RECSECRET9"),
+            "{all}"
+        );
     }
 }

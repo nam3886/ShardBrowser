@@ -182,6 +182,11 @@ const has = (s: string, q?: string) => !q?.trim() || s.toLowerCase().includes(q.
 const ordered = <T extends { email: string }>(rows: T[], order: unknown) =>
   order === "oldest" ? [...rows].reverse() : order === "email" ? [...rows].sort((x, y) => x.email.localeCompare(y.email)) : rows;
 
+/** The Emails filters but type (the type counts ignore it). */
+const emailPool = (spec: Spec & { free_for?: string }) =>
+  emails.filter((m) => has(m.email, spec.q) && (!spec.status || m.status === spec.status) && (!spec.free_for || (m.status === "active" && !m.accounts.some((x) => x.platform === spec.free_for))));
+const ofKind = (rows: EmailRow[], kind?: string) => rows.filter((m) => !kind || kind === "all" || m.provider === kind);
+
 const freeFor = (k: string) => emails.filter((m) => m.status === "active" && !m.accounts.some((a) => a.platform === k && a.status !== "failed")).length;
 
 const HANDLERS: Record<string, (args: Record<string, unknown>) => unknown> = {
@@ -279,8 +284,8 @@ const HANDLERS: Record<string, (args: Record<string, unknown>) => unknown> = {
   },
   emails: (a) => {
     const spec = a as Spec & { free_for?: string };
-    const pool = emails.filter((m) => has(m.email, spec.q) && (!spec.status || m.status === spec.status) && (!spec.free_for || (m.status === "active" && !m.accounts.some((x) => x.platform === spec.free_for))));
-    const rows = ordered(pool.filter((m) => !spec.kind || spec.kind === "all" || m.provider === spec.kind), a.order);
+    const pool = emailPool(spec);
+    const rows = ordered(ofKind(pool, spec.kind), a.order);
     return { ...page(rows, spec), counts: { all: pool.length, outlook: pool.filter((m) => m.provider === "outlook").length, ele: pool.filter((m) => m.provider === "ele").length } } satisfies EmailList;
   },
   email: (a) => {
@@ -290,7 +295,23 @@ const HANDLERS: Record<string, (args: Record<string, unknown>) => unknown> = {
     const all = mailOf(m.id, m.mails);
     return { ...m, items: all.slice(0, 50), more: all.length > 50, technical: { browser_id: m.id, profile: m.accounts.length ? profileId(m.id) : null, proxy: m.accounts.length ? PROXIES_ADDR[m.id % 5] : null } } satisfies EmailDetail;
   },
-  email_mail: (a) => { const all = mailOf(Number(a.id), 0); const o = Number(a.offset); return { items: all.slice(o, o + 50), more: all.length > o + 50 }; },
+  /** The next 50 older than `before_id` (the backend's cursor). */
+  email_mail: (a) => { const all = mailOf(Number(a.id), 0); const o = all.findIndex((m) => m.id === Number(a.before_id)) + 1; return { items: all.slice(o, o + 50), more: all.length > o + 50 }; },
+  /** Every id under the filters ("Test all mailboxes"). */
+  email_ids: (a) => ofKind(emailPool(a as Spec), (a as Spec).kind).map((m) => m.id),
+  add_outlook: (a) => {
+    const known = new Set(emails.map((m) => m.email));
+    const r = { added: 0, duplicates: [] as number[], invalid: [] as [number, string][] };
+    String(a.text ?? "").split("\n").forEach((raw, i) => {
+      const p = raw.trim().split("|").map((x) => x.trim());
+      if (!raw.trim()) return;
+      if (p.length !== 5 || !p[0].split("@")[1] || !p[2] || !p[3]) r.invalid.push([i + 1, "not email|password|refresh_token|client_id|recovery"]);
+      else if (known.has(p[0])) r.duplicates.push(i + 1);
+      else { known.add(p[0]); r.added++; }
+    });
+    return r;
+  },
+  add_ele: (a) => ({ created: Number(a.count) }),
   platforms: () => PLATFORMS.map((p) => ({ ...p, free: freeFor(p.key) })),
   /** How many free emails each sign-up route has for a platform ("" = Auto). */
   make_options: (a) => {

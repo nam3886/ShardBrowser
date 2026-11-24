@@ -46,11 +46,11 @@ Rust test binaries need a Common-Controls v6 manifest, or they die at start with
 
 ## Live Breeze Blue run
 
-`creator::runner::live::live_breeze` (ignored) makes real accounts through the app's own run path (`begin_job` + `make_breeze` on Shard profiles) without starting the app. Its header lists the variables: the engine, a fingerprint library folder, a copy of the Python `ghidorah.sqlite` to import proxies and Ele settings from, an output folder that keeps our store between runs, the count and the proxy mode.
+`creator::runner::live::live_breeze` (ignored) makes real accounts through the app's own run path (`begin_job` + `make_breeze` on Shard profiles) without starting the app. Its header lists the variables: the engine, a fingerprint library folder, a copy of the Python `ghidorah.sqlite` to import proxies and Ele settings from, an output folder that keeps our store between runs, the count, the proxy mode and the mailbox type (`CREATOR_LIVE_MAILBOX=ele|outlook`; Outlook takes the store's free mailboxes, oldest first). `creator::runner::live::live_outlook_test` (ignored) pastes a file of Outlook combo lines into the same store and tests each new mailbox once, 5 at a time; it needs no browser. `creator::runner::live::dev_bridge` (ignored) answers our pages' commands over HTTP on a fresh sandboxed store, so `npm run dev:mock` with `VITE_CREATOR_BRIDGE=http://127.0.0.1:4795` shows our real pages from an SSH session; the built app cannot run there (WebView2 needs the desktop session, where stock ShardBrowser holds the single instance). Name the test: the module holds several.
 
 ```powershell
 cd src-tauri
-cargo test --locked --lib creator::runner::live -- --ignored --nocapture --test-threads=1
+cargo test --locked --lib creator::runner::live::live_breeze -- --ignored --nocapture --test-threads=1
 ```
 
 Run it in an interactive desktop session (for example a scheduled task with "run only when the user is logged on"), not from a non-interactive SSH session, so the browser windows have a desktop. Import from a copy of the Python database (with its `-wal` and `-shm`), never from the file the Python app has open.

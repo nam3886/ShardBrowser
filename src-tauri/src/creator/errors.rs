@@ -15,7 +15,17 @@ use super::shard::GEO_FAILED;
 use super::web::BROWSER_HUNG;
 
 /// Python `ele.MAILBOX_GONE`.
-const MAILBOX_GONE: &str = "mailbox gone";
+pub const MAILBOX_GONE: &str = "mailbox gone";
+
+/// The codes Retry never shows for (Python `Code.retryable` false): no
+/// rerun fixes them.
+pub const NOT_RETRYABLE: &[&str] = &[
+    "MAILBOX_GONE",
+    "DOMAIN_BLOCKED",
+    "EMAIL_REFUSED",
+    "ACCOUNT_EXISTS",
+    "ACCOUNT_BANNED",
+];
 
 const EXACT: &[(&str, &str)] = &[
     (INTERRUPTED, "INTERRUPTED"),
@@ -68,6 +78,11 @@ const RULES: &[(Rule, &str)] = &[
     (Rule::Contains(PROFILE_GONE), "NO_BROWSER"),
     (Rule::Re(&GONE_RE), "MAILBOX_GONE"),
     (Rule::Contains("Ele API unavailable"), "MAIL_API_DOWN"),
+    (Rule::Contains("Outlook unavailable"), "MAIL_API_DOWN"),
+    (
+        Rule::Contains(" mail, likely registered elsewhere"),
+        "ACCOUNT_EXISTS",
+    ),
     (Rule::Prefix(tts::NO_KEY), "API_KEY_FAILED"),
     (Rule::Prefix(tts::KEY_TEST_FAILED), "API_KEY_FAILED"),
     // Shard's launch refusals (`launch.rs`, `runtime.rs`) and our CDP wait
@@ -141,11 +156,7 @@ pub fn fail_info(code: &str) -> (&'static str, bool) {
         | "PARENT_FAILED" | "SESSION_NOT_KEPT" | "CONSOLE_CHECK" => "account",
         _ => "other",
     };
-    let retryable = !matches!(
-        code,
-        "MAILBOX_GONE" | "DOMAIN_BLOCKED" | "EMAIL_REFUSED" | "ACCOUNT_EXISTS" | "ACCOUNT_BANNED"
-    );
-    (group, retryable)
+    (group, !NOT_RETRYABLE.contains(&code))
 }
 
 /// Python `Code.streak`: whether a failure with this code counts toward a
@@ -168,7 +179,44 @@ pub fn counts_toward_streak(code: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{counts_toward_streak, error_code};
+    use super::{counts_toward_streak, error_code, fail_info, NOT_RETRYABLE};
+
+    #[test]
+    fn outlook_unavailable_is_mail_api_down() {
+        for text in [
+            "Outlook unavailable: inbox token HTTP 503",
+            "mail: Outlook unavailable: inbox HTTP 429",
+        ] {
+            assert_eq!(error_code(text), Some("MAIL_API_DOWN"), "{text}");
+        }
+        assert_eq!(error_code("mailbox gone"), Some("MAILBOX_GONE"));
+        assert_eq!(
+            error_code(&crate::creator::providers::has_mail_error("breezeblue")),
+            Some("ACCOUNT_EXISTS")
+        );
+        assert!(fail_info("MAIL_API_DOWN").1);
+    }
+
+    /// The design's error table (code, group, retryable) holds exactly
+    /// these as "no".
+    #[test]
+    fn not_retryable_is_the_design_tables_no() {
+        let table = include_str!("../../../docs/creator/design/index.md");
+        let re = regex::Regex::new(r"(?m)^\| ([A-Z_]+) \| [^|]+ \| (yes|no) \|").unwrap();
+        let mut no: Vec<&str> = re
+            .captures_iter(table)
+            .filter(|c| &c[2] == "no")
+            .map(|c| c.get(1).unwrap().as_str())
+            .collect();
+        no.sort_unstable();
+        let mut ours = NOT_RETRYABLE.to_vec();
+        ours.sort_unstable();
+        assert_eq!(no, ours);
+        for code in NOT_RETRYABLE {
+            assert!(!fail_info(code).1, "{code}");
+        }
+        assert!(re.captures_iter(table).count() > 30);
+    }
 
     #[test]
     fn engine_and_owner_causes_never_count_toward_the_streak() {

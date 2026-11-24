@@ -9,7 +9,17 @@
 //! CREATOR_LIVE_IMPORT=<copy of ghidorah.sqlite> # proxies, blocked domains, Ele settings
 //! CREATOR_LIVE_OUT=<dir>                        # our store (kept between runs) + screenshots
 //! CREATOR_LIVE_COUNT=1 CREATOR_LIVE_PROXY_MODE=rotate
-//! cargo test --lib creator::runner::live -- --ignored --nocapture
+//! CREATOR_LIVE_MAILBOX=ele                      # or outlook: the store's free ones, oldest first
+//! cargo test --lib creator::runner::live::live_breeze -- --ignored --nocapture
+//! ```
+//!
+//! `live_outlook_test` (M3 live gate) pastes Outlook combo lines from a file
+//! into the same store and tests each new mailbox once, 5 at a time, as the
+//! Emails page's Test does:
+//!
+//! ```text
+//! CREATOR_LIVE_OUT=<dir> CREATOR_LIVE_OUTLOOK=<file of combo lines>
+//! cargo test --lib creator::runner::live::live_outlook_test -- --ignored --nocapture
 //! ```
 //!
 //! Prints per account its status, error code, seconds and events (stored
@@ -60,8 +70,13 @@ async fn live_breeze() {
     }
     let count: u32 = std::env::var("CREATOR_LIVE_COUNT").map_or(1, |v| v.parse().unwrap());
     let mode = std::env::var("CREATOR_LIVE_PROXY_MODE").unwrap_or_else(|_| "rotate".into());
+    let mailbox = std::env::var("CREATOR_LIVE_MAILBOX").unwrap_or_else(|_| "ele".into());
     let cx = Ctx {
-        ele: ele_client(&db).unwrap(),
+        ele: match mailbox.as_str() {
+            "ele" => Some(ele_client(&db).unwrap()),
+            _ => None,
+        },
+        outlook: OutlookClient::new(db.clone(), OutlookUrls::live()).unwrap(),
         db: db.clone(),
         browsers: Shard,
         urls: Urls::live(),
@@ -70,7 +85,7 @@ async fn live_breeze() {
     };
     let run = RunState::default();
     let job = begin_job(&db, &run, count, &mode).unwrap();
-    make_breeze(&cx, count, &mode, &run).await;
+    make_breeze(&cx, count, &mode, &mailbox, &run).await;
     run.end();
 
     let mut accts: Vec<_> = db
@@ -111,4 +126,90 @@ async fn live_breeze() {
         accts.len(),
         accts.iter().filter(|a| a.status == "linked").count()
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn live_outlook_test() {
+    let out = PathBuf::from(env("CREATOR_LIVE_OUT"));
+    std::fs::create_dir_all(&out).unwrap();
+    let db = Arc::new(Db::open(&out.join("creator.sqlite")).unwrap());
+    let text = std::fs::read_to_string(env("CREATOR_LIVE_OUTLOOK")).unwrap();
+    let outlook_ids = || {
+        let q = store::EmailQuery {
+            kind: Some("outlook".into()),
+            ..Default::default()
+        };
+        db.email_ids(&q).unwrap()
+    };
+    let before = outlook_ids();
+    let r = db.import_outlook(&text).unwrap();
+    eprintln!(
+        "IMPORT added={} duplicates={} invalid={}",
+        r.added,
+        r.duplicates.len(),
+        r.invalid.len()
+    );
+    let new: Vec<i64> = outlook_ids()
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    let outlook = OutlookClient::new(db.clone(), OutlookUrls::live()).unwrap();
+    use futures_util::StreamExt;
+    let states: Vec<&str> = futures_util::stream::iter(new.iter().copied())
+        .map(|id| crate::creator::pages::test_one(&db, None, &outlook, id))
+        .buffered(5)
+        .collect()
+        .await;
+    for (id, st) in new.iter().zip(&states) {
+        eprintln!("MAILBOX {id} {st}");
+    }
+    for s in ["active", "gone", "failed"] {
+        eprintln!("TOTAL {s}={}", states.iter().filter(|x| **x == s).count());
+    }
+}
+
+/// Task 5's dev run on the Windows test box: our commands (`pages::call`) on a
+/// fresh sandboxed store, over HTTP on 127.0.0.1:4795, for `npm run dev:mock`
+/// with `VITE_CREATOR_BRIDGE=http://127.0.0.1:4795` (see `src/creator/api.ts`).
+/// Our built app cannot run there: its WebView2 needs the desktop session,
+/// where stock ShardBrowser holds the single instance. Prints `DB <path>`;
+/// stops after `CREATOR_BRIDGE_SECS` (1800).
+#[tokio::test]
+#[ignore]
+async fn dev_bridge() {
+    use axum::http::header;
+    use axum::routing::post;
+    /// The dev server's page (`dev:mock --port 4796`): the only origin answered.
+    const DEV_ORIGIN: &str = "http://127.0.0.1:4796";
+    let _serial = crate::migrate::serial();
+    let _root = crate::store::test_root("creator-bridge").with_config();
+    eprintln!("DB {}", store::db_path().unwrap().display());
+    // A text/plain body keeps the page's fetch a simple request (no preflight).
+    let app = axum::Router::new().route(
+        "/call",
+        post(|body: String| async move {
+            let b: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let cmd = b["cmd"].as_str().unwrap_or("");
+            let r = match crate::creator::pages::call(cmd, &b["args"]).await {
+                Some(Ok(v)) => json!({ "ok": v }),
+                Some(Err(e)) => json!({ "err": format!("{e:#}") }),
+                None => json!({ "err": format!("unknown creator command: {cmd}") }),
+            };
+            (
+                [(header::ACCESS_CONTROL_ALLOW_ORIGIN, DEV_ORIGIN)],
+                axum::Json(r),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:4795")
+        .await
+        .unwrap();
+    let secs = std::env::var("CREATOR_BRIDGE_SECS").map_or(1800, |v| v.parse().unwrap());
+    eprintln!("BRIDGE up");
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(secs),
+        axum::serve(listener, app),
+    )
+    .await;
 }

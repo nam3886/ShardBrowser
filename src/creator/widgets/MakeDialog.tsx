@@ -21,16 +21,17 @@ const loadChoice = (): Choice => {
 };
 
 /** Most accounts one Make run takes (the backend's `breeze_run` limit). */
-const MAX = 20;
+export const MAX = 20;
 
-export function MakeDialog({ open, platform, count: given, onClose, onStarted }: { open: boolean; platform?: string; count?: number; onClose: () => void; onStarted?: () => void }) {
+export function MakeDialog({ open, platform, route: givenRoute, count: given, onClose, onStarted }: { open: boolean; platform?: string; route?: string; count?: number; onClose: () => void; onStarted?: () => void }) {
   const ct = useCt();
   const [choice, setChoice] = useState(loadChoice);
   // The real backend makes Breeze Blue only (M2); the mock, every service.
   const k = platform ?? (MOCK ? choice.k : "breezeblue");
   const [count, setCount] = useState(given ?? 5);
-  useEffect(() => { if (open && given) setCount(given); }, [open, given]);
-  const [route, setRoute] = useState("");
+  useEffect(() => { if (open && given) setCount(Math.min(given, MAX)); }, [open, given]);
+  const [route, setRoute] = useState(givenRoute ?? "");
+  useEffect(() => { if (open && givenRoute) setRoute(givenRoute); }, [open, givenRoute]);
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   // Free emails per route; null: a new mailbox is made for each account (Ele).
   const [options, setOptions] = useState<Record<string, number | null>>({});
@@ -64,7 +65,7 @@ export function MakeDialog({ open, platform, count: given, onClose, onStarted }:
       confirmLabel={ct("creator.make.confirm", { n: count })}
       isDisabled={short || !!block}
       footerNote={block ? ct(`creator.make.block.${block}`) : short ? (free === 1 ? ct("creator.make.shortOne") : ct("creator.make.short", { n: free })) : undefined}
-      onConfirm={() => void call("breeze_run", { count, proxy_mode: choice.proxy }).then(() => {
+      onConfirm={() => void call("breeze_run", { count, proxy_mode: choice.proxy, route }).then(() => {
         toast.ok(ct("creator.make.queued", { n: count, name: platformLabel(k) }));
         onStarted?.();
         onClose();

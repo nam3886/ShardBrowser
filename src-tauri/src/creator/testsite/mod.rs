@@ -1,8 +1,9 @@
 //! Test-only: a fake Breeze Blue in-process, at the real site's paths, with
 //! knobs per test. One account (the test's email); the session is a cookie.
 //! The Turnstile-like widget is served on the `other` origin (cross-site, its
-//! own process), like Cloudflare's frame. A fake Ele API under `/ele/` holds
-//! the verify mail once the account exists (`Site::ele`).
+//! own process), like Cloudflare's frame. A fake Ele API under `/ele/` and a
+//! fake Outlook (token + Graph) under `/ms/` hold the verify mail once the
+//! account exists (`Site::ele`, `Site::outlook_urls`).
 
 use std::sync::{Arc, Mutex};
 
@@ -13,6 +14,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
+use crate::creator::mail::OutlookUrls;
 use crate::creator::providers::breezeblue::Urls;
 use crate::creator::web::testkit::FixtureServer;
 
@@ -66,6 +68,17 @@ pub enum Survey {
     AfterKeyPageLoads,
 }
 
+/// The fake Outlook token endpoint's answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum OutlookToken {
+    /// An access token and a new (rotated) refresh token each call.
+    #[default]
+    Ok,
+    /// 400 `invalid_grant`: the mailbox is dead.
+    InvalidGrant,
+    Http(u16),
+}
+
 #[derive(Clone, Debug)]
 pub struct Knobs {
     pub turnstile: Turnstile,
@@ -81,6 +94,10 @@ pub struct Knobs {
     /// After the last skip the survey saves this long ("Skip question" disabled).
     pub survey_busy_ms: u64,
     pub balance_status: u16,
+    pub outlook_token: OutlookToken,
+    /// Graph also holds a Breeze Blue mail from before the run (the address
+    /// was registered elsewhere).
+    pub outlook_old_breeze_mail: bool,
 }
 
 impl Default for Knobs {
@@ -96,6 +113,8 @@ impl Default for Knobs {
             survey: Survey::AfterVerify,
             survey_busy_ms: 0,
             balance_status: 200,
+            outlook_token: OutlookToken::Ok,
+            outlook_old_breeze_mail: false,
         }
     }
 }
@@ -111,6 +130,8 @@ pub struct Seen {
     /// `xi-api-key` of each /v1/balance call.
     pub balance_keys: Vec<String>,
     pub typed_password: Option<String>,
+    /// Refresh tokens the fake Outlook handed out (each call rotates it).
+    pub outlook_issued: Vec<String>,
 }
 
 struct St {
@@ -159,6 +180,8 @@ impl Site {
             .route("/ele/mail-domains", get(ele_domains))
             .route("/ele/inbox", post(ele_inbox))
             .route("/ele/inbox/:token/emails", get(ele_emails))
+            .route("/ms/oauth20_token.srf", post(ms_token))
+            .route("/ms/v1.0/me/messages", get(ms_messages))
             .with_state(st.clone());
         let server = FixtureServer::start_with(routes).await;
         {
@@ -186,6 +209,11 @@ impl Site {
     /// The fake Ele API's base URL (`EleClient::new`).
     pub fn ele(&self) -> String {
         format!("{}/ele/", self.urls.login.split("/auth/").next().unwrap())
+    }
+
+    /// The fake Outlook's endpoints (`OutlookClient::new`).
+    pub fn outlook_urls(&self) -> OutlookUrls {
+        OutlookUrls::on(self.urls.login.split("/auth/").next().unwrap())
     }
 
     pub fn seen<T>(&self, f: impl FnOnce(&Seen) -> T) -> T {
@@ -407,7 +435,7 @@ async fn ele_inbox() -> Response {
 }
 
 /// The verify mail, once the account exists. The link is the fake site's
-/// (http: the runner's test inbox takes it, see `runner::EleInbox`).
+/// (http: the runner's test inbox takes it, see `runner::MailInbox`).
 async fn ele_emails(Ax(st): Ax<Shared>) -> Json<serde_json::Value> {
     let st = st.lock().unwrap();
     let mail = st.mail_at.as_ref().map(|at| {
@@ -418,4 +446,43 @@ async fn ele_emails(Ax(st): Ax<Shared>) -> Json<serde_json::Value> {
         })
     });
     Json(json!({ "emails": mail.into_iter().collect::<Vec<_>>() }))
+}
+
+async fn ms_token(Ax(st): Ax<Shared>) -> Response {
+    let mut st = st.lock().unwrap();
+    match st.k.outlook_token {
+        OutlookToken::Ok => {
+            let rt = format!("RT-rotated-{}", st.seen.outlook_issued.len() + 1);
+            st.seen.outlook_issued.push(rt.clone());
+            Json(json!({ "access_token": "AT-site", "refresh_token": rt })).into_response()
+        }
+        OutlookToken::InvalidGrant => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_grant" })),
+        )
+            .into_response(),
+        OutlookToken::Http(code) => (StatusCode::from_u16(code).unwrap(), "{}").into_response(),
+    }
+}
+
+/// Graph's answer: the verify mail once the account exists.
+async fn ms_messages(Ax(st): Ax<Shared>) -> Json<serde_json::Value> {
+    let st = st.lock().unwrap();
+    let mail = st.mail_at.as_ref().map(|at| {
+        json!({
+            "id": "verify-1", "subject": "Verify your email", "receivedDateTime": at,
+            "from": { "emailAddress": { "address": "noreply@breezeblue.ai" } },
+            "body": { "contentType": "html",
+                      "content": format!("<p>Hi</p><a href=\"{}/verify?t={VERIFY_TOKEN}\">Verify email</a>", st.site) },
+        })
+    });
+    let old = st.k.outlook_old_breeze_mail.then(|| {
+        json!({
+            "id": "old-1", "subject": "Reset your password for Breeze Blue",
+            "receivedDateTime": "2026-01-01T00:00:00Z",
+            "from": { "emailAddress": { "address": "noreply@breezeblue.ai" } },
+            "body": { "contentType": "text", "content": "Reset" },
+        })
+    });
+    Json(json!({ "value": mail.into_iter().chain(old).collect::<Vec<_>>() }))
 }
