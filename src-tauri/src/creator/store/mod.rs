@@ -665,8 +665,10 @@ impl Db {
     /// none failed with a code no retry fixes.
     /// A mailbox holding mail from the platform's domains is used for it
     /// already (owner, 2026-11-24): never free for it.
-    // ponytail: no count cache (Python caches by table revisions); the
-    // 500k perf test says whether one is needed.
+    // ponytail: no count cache (Python caches by table revisions), and the
+    // platform-mail rule scans the mail table's senders (~0.5 s at 400k mails
+    // in a debug build); a stored "used for" flag or a revision cache if the
+    // Make dialog feels it.
     pub fn breeze_free_outlook_where() -> (String, Vec<rusqlite::types::Value>) {
         use rusqlite::types::Value as V;
         let key = super::providers::breezeblue::KEY;
@@ -1379,7 +1381,8 @@ fn platform_mail_cond(platform: &str) -> (String, Vec<rusqlite::types::Value>) {
         args.push(rusqlite::types::Value::Text(format!("%@{d}%")));
         args.push(rusqlite::types::Value::Text(format!("%.{d}%")));
     }
-    let likes = vec!["lower(x.sender) LIKE ?"; args.len()].join(" OR ");
+    // SQLite's LIKE ignores ASCII case already.
+    let likes = vec!["x.sender LIKE ?"; args.len()].join(" OR ");
     (format!("({likes})"), args)
 }
 
