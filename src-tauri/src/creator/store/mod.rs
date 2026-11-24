@@ -678,7 +678,7 @@ impl Db {
              AND m.token<>'' AND COALESCE(m.client_id,'')<>'' \
              AND m.id NOT IN (SELECT mailbox_id FROM accounts WHERE platform=? \
              AND ((status<>'failed' OR frozen=1) OR (status='failed' AND error_code IN ({})))) \
-             AND NOT EXISTS (SELECT 1 FROM mail_messages x WHERE x.mailbox_id=m.id AND {mail})",
+             AND m.id NOT IN (SELECT x.mailbox_id FROM mail_messages x WHERE {mail})",
             vec!["?"; fatal.len()].join(",")
         );
         let mut args = vec![V::Text(key.into())];
