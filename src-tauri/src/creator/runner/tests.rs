@@ -803,3 +803,22 @@ async fn a_retry_on_a_mailbox_with_older_breeze_mail_is_account_exists() {
     assert!(cx.db.has_platform_mail(mb, KEY, None).unwrap());
     assert!(!cx.db.has_platform_mail(mb, "fish", None).unwrap());
 }
+
+#[tokio::test]
+async fn a_retry_on_an_ele_mailbox_is_not_judged_by_its_mail_dates() {
+    let (cx, _f, _site) = site_ctx(Knobs::default()).await;
+    let mb = cx.db.mailbox_create("ele", "e@ele.test", "ele.test", "tok").unwrap();
+    cx.db.browser_create(mb.id, None, "none").unwrap();
+    let id = cx.db.account_create(mb.id, KEY, "email", None).unwrap();
+    let m = store::NewMail {
+        sender: "Breeze Blue <noreply@breezeblue.ai>".into(),
+        received_at: Some("2026-01-01T00:00:00".into()),
+        ..Default::default()
+    };
+    cx.db.mail_create(mb.id, &m).unwrap();
+    cx.browsers.fail_open.store(true, SeqCst);
+    // Past the mail rule: it reaches the browser.
+    let out = run_account(&cx, id).await;
+    assert_eq!(out, failed("ShardBrowser did not open".into()));
+    assert_eq!(cx.browsers.opens.load(SeqCst), 1);
+}

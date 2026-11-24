@@ -345,7 +345,8 @@ async fn attempt<B: Browsers>(cx: &Ctx<B>, id: i64, scrub: &Scrub) -> Result<End
         }
     }
     // Breeze Blue mail from before this account was made: registered elsewhere.
-    if db.has_platform_mail(mb.id, KEY, Some(&acc.created_at))? {
+    // Outlook only: Graph dates mail in UTC, Ele's naive clock may be hours off.
+    if mb.provider == "outlook" && db.has_platform_mail(mb.id, KEY, Some(&acc.created_at))? {
         bail!(super::providers::has_mail_error(KEY));
     }
     let opened = cx.browsers.open(db, br.id, proxy.as_ref()).await?;

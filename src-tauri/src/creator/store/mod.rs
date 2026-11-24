@@ -1368,8 +1368,9 @@ impl Db {
     }
 }
 
-/// `(sender LIKE …)` on alias `x` for the platform's mail domains (an
-/// address at the domain or a subdomain); false for a platform with none.
+/// `(sender LIKE …)` on alias `x` for the platform's mail domains: a sender
+/// ending in an address at the domain or a subdomain, bare (Outlook) or as
+/// `Name <addr>` (Ele); false for a platform with none.
 fn platform_mail_cond(platform: &str) -> (String, Vec<rusqlite::types::Value>) {
     let domains = super::providers::mail_domains(platform);
     if domains.is_empty() {
@@ -1378,8 +1379,10 @@ fn platform_mail_cond(platform: &str) -> (String, Vec<rusqlite::types::Value>) {
     let mut args = Vec::new();
     for d in domains {
         let d = d.replace('%', "").replace('_', "");
-        args.push(rusqlite::types::Value::Text(format!("%@{d}%")));
-        args.push(rusqlite::types::Value::Text(format!("%.{d}%")));
+        for p in [format!("%@{d}"), format!("%.{d}")] {
+            args.push(rusqlite::types::Value::Text(p.clone()));
+            args.push(rusqlite::types::Value::Text(format!("{p}>")));
+        }
     }
     // SQLite's LIKE ignores ASCII case already.
     let likes = vec!["x.sender LIKE ?"; args.len()].join(" OR ");
@@ -1731,6 +1734,45 @@ mod tests {
         let bare = NewMail::default();
         assert!(db.mail_add(mb.id, &bare).unwrap().is_some());
         assert!(db.mail_add(mb.id, &bare).unwrap().is_some());
+    }
+
+    #[test]
+    fn platform_mail_is_matched_by_the_sender_domain_only() {
+        let (db, _f) = temp_db();
+        let has = |sender: &str| {
+            let mb = db
+                .mailbox_create("outlook", &format!("{}@o.example", uuid::Uuid::new_v4().simple()), "o.example", "T")
+                .unwrap();
+            let m = NewMail {
+                sender: sender.into(),
+                ..Default::default()
+            };
+            db.mail_create(mb.id, &m).unwrap();
+            db.has_platform_mail(mb.id, "breezeblue", None).unwrap()
+        };
+        for yes in [
+            "noreply@breezeblue.ai",
+            "NoReply@BreezeBlue.AI",
+            "Breeze Blue <noreply@breezeblue.ai>",
+            "hi@mail.breezeblue.ai",
+        ] {
+            assert!(has(yes), "{yes}");
+        }
+        for no in [
+            "a@notbreezeblue.ai",
+            "a@breezeblue.ai.evil.example",
+            "john.breezeblue.ai@gmail.example",
+            "Breeze Blue <a@gmail.example>",
+        ] {
+            assert!(!has(no), "{no}");
+        }
+        let mb = db.mailbox_create("outlook", "x@o.example", "o.example", "T").unwrap();
+        let m = NewMail {
+            sender: "john.x.ai@gmail.example".into(),
+            ..Default::default()
+        };
+        db.mail_create(mb.id, &m).unwrap();
+        assert!(!db.has_platform_mail(mb.id, "grok", None).unwrap());
     }
 
     #[test]
