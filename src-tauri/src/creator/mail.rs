@@ -576,7 +576,7 @@ fn with_digit(r: &Regex, t: &str) -> Option<String> {
     None
 }
 
-static OTP: LazyLock<[Regex; 10]> = LazyLock::new(|| {
+static OTP: LazyLock<[Regex; 12]> = LazyLock::new(|| {
     [
         re(r"(?i)(?:one-time\s*)?verification\s*code\s*is:?\s*([A-Za-z0-9]{6})\b"),
         re(
@@ -585,6 +585,10 @@ static OTP: LazyLock<[Regex; 10]> = LazyLock::new(|| {
         re(r"(?i)(?:confirmation|verification|security)\s*code\s*is:?\s*(\d{5,8})\b"),
         re(r"(?i)G-(\d{6})\b"),
         re(r"(?i)(?:code|verify|verification)[^\d]{1,25}(\d{3})\s+(\d{3})\b"),
+        // "67571 is your Facebook confirmation code": no trailing \b, since
+        // subject and body are joined with no separator ("codeOne more step").
+        re(r"(?i)\b(\d{4,8})\s+is\s+your\b[^.\n]{0,40}?\bcode"),
+        re(r"(?i)\bthis\s+code\b[^\w]{1,5}(\d{4,8})\b"),
         re(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.\-]+"),
         re(r"(?i)[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"),
         re(r"\b([A-Z0-9]{6})\b"),
@@ -597,7 +601,7 @@ static OTP: LazyLock<[Regex; 10]> = LazyLock::new(|| {
 /// every pattern in its order, then the fallback). Letter codes are
 /// upper-cased.
 pub fn extract_otp(text: &str) -> Option<String> {
-    let [p1, p2, p3, p4, p5, mail, uuid, word, tag, ws] = &*OTP;
+    let [p1, p2, p3, p4, p5, p6, p7, mail, uuid, word, tag, ws] = &*OTP;
     if text.is_empty() {
         return None;
     }
@@ -611,6 +615,9 @@ pub fn extract_otp(text: &str) -> Option<String> {
     }
     if let Some(c) = p5.captures(&t) {
         return Some(format!("{}{}", &c[1], &c[2]));
+    }
+    if let Some(c) = p6.captures(&t).or_else(|| p7.captures(&t)) {
+        return Some(c[1].to_string());
     }
     let f = mail.replace_all(&t, " ");
     let f = uuid.replace_all(&f, " ");
@@ -1687,6 +1694,16 @@ mod tests {
                 Some("378554"),
             ),
             ("Welcome 2026, total $19.99, zip 90210", None),
+            ("67571 is your Facebook confirmation code", Some("67571")),
+            (
+                "67571 is your Facebook confirmation codeOne more step to sign up. Hi Sam, We got your request to create a Meta Account on Facebook. You may be asked to enter this code: 67571 Don't share this code with anyone.",
+                Some("67571"),
+            ),
+            (
+                "One more step to sign up. Hi Sam, You may be asked to enter this code: 67571 Don't share this code with anyone.",
+                Some("67571"),
+            ),
+            ("2026 is your year", None),
         ] {
             assert_eq!(extract_otp(text).as_deref(), code, "{text:?}");
         }
