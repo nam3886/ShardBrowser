@@ -807,7 +807,10 @@ async fn a_retry_on_a_mailbox_with_older_breeze_mail_is_account_exists() {
 #[tokio::test]
 async fn a_retry_on_an_ele_mailbox_is_not_judged_by_its_mail_dates() {
     let (cx, _f, _site) = site_ctx(Knobs::default()).await;
-    let mb = cx.db.mailbox_create("ele", "e@ele.test", "ele.test", "tok").unwrap();
+    let mb = cx
+        .db
+        .mailbox_create("ele", "e@ele.test", "ele.test", "tok")
+        .unwrap();
     cx.db.browser_create(mb.id, None, "none").unwrap();
     let id = cx.db.account_create(mb.id, KEY, "email", None).unwrap();
     let m = store::NewMail {

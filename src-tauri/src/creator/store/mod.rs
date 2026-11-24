@@ -1741,7 +1741,12 @@ mod tests {
         let (db, _f) = temp_db();
         let has = |sender: &str| {
             let mb = db
-                .mailbox_create("outlook", &format!("{}@o.example", uuid::Uuid::new_v4().simple()), "o.example", "T")
+                .mailbox_create(
+                    "outlook",
+                    &format!("{}@o.example", uuid::Uuid::new_v4().simple()),
+                    "o.example",
+                    "T",
+                )
                 .unwrap();
             let m = NewMail {
                 sender: sender.into(),
@@ -1766,7 +1771,9 @@ mod tests {
         ] {
             assert!(!has(no), "{no}");
         }
-        let mb = db.mailbox_create("outlook", "x@o.example", "o.example", "T").unwrap();
+        let mb = db
+            .mailbox_create("outlook", "x@o.example", "o.example", "T")
+            .unwrap();
         let m = NewMail {
             sender: "john.x.ai@gmail.example".into(),
             ..Default::default()
