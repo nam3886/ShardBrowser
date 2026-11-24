@@ -825,3 +825,50 @@ async fn a_retry_on_an_ele_mailbox_is_not_judged_by_its_mail_dates() {
     assert_eq!(out, failed("ShardBrowser did not open".into()));
     assert_eq!(cx.browsers.opens.load(SeqCst), 1);
 }
+
+/// Until the first open's import ends, `db()` says so; a failed import is
+/// answered as is, never retried, until the app restarts.
+#[test]
+fn db_reports_importing_then_the_same_failure() {
+    let _serial = crate::migrate::serial();
+    let _root = crate::store::test_root("creator-dbimport");
+    reset_db_for_test();
+    let python = store::python_db_path().unwrap();
+    std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+    let dest = store::db_path().unwrap();
+    let temps = || {
+        [".src", ".src-wal", ".import"]
+            .iter()
+            .any(|s| std::path::Path::new(&format!("{}{s}", dest.display())).exists())
+    };
+    let settled = || loop {
+        match db() {
+            Err(e) if e.to_string() == IMPORTING => std::thread::sleep(Duration::from_millis(20)),
+            r => return r,
+        }
+    };
+
+    let junk: Vec<u8> = (0..4096).map(|_| rand::random::<u8>()).collect();
+    std::fs::write(&python, junk).unwrap();
+    assert_eq!(db().err().expect("importing").to_string(), IMPORTING);
+    let failed = settled().err().expect("the import fails").to_string();
+    assert_ne!(failed, IMPORTING);
+    assert!(!dest.exists() && !temps());
+    // A retry would now open a fresh store: the same failure says none ran.
+    std::fs::remove_file(&python).unwrap();
+    assert_eq!(db().err().expect("still failed").to_string(), failed);
+    assert!(!dest.exists() && !temps());
+
+    reset_db_for_test();
+    let fixture = store::python_fixture();
+    std::fs::copy(&fixture.0, &python).unwrap();
+    assert_eq!(db().err().expect("importing").to_string(), IMPORTING);
+    let db = settled().expect("imported");
+    let all = store::EmailQuery {
+        limit: 100,
+        ..Default::default()
+    };
+    assert_eq!(db.email_list(&all).unwrap()["total"], 3);
+    drop(db);
+    reset_db_for_test();
+}

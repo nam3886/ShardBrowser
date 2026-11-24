@@ -2,7 +2,7 @@
 //! (`schema_v24.sql`), so an import later is a copy of `ghidorah.sqlite` (D7).
 //! Row functions are few and plain: only what M2 calls.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -465,6 +465,11 @@ impl Db {
             VERSION => {}
             n => bail!("database version {n} not supported"),
         }
+        // Ours, not Python's (no version change): the platform-mail rule reads
+        // senders and mailbox ids only, never the mail bodies.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_mail_sender ON mail_messages(sender, mailbox_id)",
+        )?;
         Ok(Db(Mutex::new(conn)))
     }
 
@@ -1454,6 +1459,140 @@ pub fn import_basics(db: &Db, src: &Path) -> Result<ImportCounts> {
     Ok(n)
 }
 
+/// The Python app's database: `%LOCALAPPDATA%\ghidorah-creator\ghidorah.sqlite`,
+/// beside our local root.
+pub fn python_db_path() -> Result<PathBuf> {
+    let root = crate::store::local_root()?;
+    let parent = root
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("the local data folder has no parent"))?;
+    Ok(parent.join("ghidorah-creator").join("ghidorah.sqlite"))
+}
+
+/// What a full import brought: counts only, never a value (`creator-import.json`).
+#[derive(Debug, serde::Serialize)]
+pub struct ImportReport {
+    pub version: i64,
+    /// `"<provider>/<status>"`.
+    pub mailboxes: BTreeMap<String, i64>,
+    /// `"<platform>/<status>"`.
+    pub accounts: BTreeMap<String, i64>,
+    pub proxies: i64,
+    pub browsers: i64,
+    /// Browser rows holding a Shard profile id.
+    pub browsers_with_profile: i64,
+    /// Accounts Python left queued, running or waiting.
+    pub live_accounts: i64,
+    pub mail_messages: i64,
+    pub seconds: f64,
+}
+
+/// `path` + `suffix` (`creator.sqlite` + `.src` = `creator.sqlite.src`).
+fn suffixed(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    s.into()
+}
+
+fn remove_import_temps(dest: &Path) {
+    for s in [".src", ".import"] {
+        for w in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(suffixed(dest, &format!("{s}{w}")));
+        }
+    }
+}
+
+/// The Python database becomes our store at `dest`, as an exact copy (D7).
+/// SQLite never opens `src`: its file (and `-wal`, never `-shm`) is copied
+/// byte for byte to `dest.src`, which is vacuumed into `dest.import`, checked,
+/// flushed and hard-linked as `dest`. Temp files go in every case; a failure
+/// leaves no `dest`, and an existing `dest` is never replaced.
+pub fn import_python(src: &Path, dest: &Path) -> Result<ImportReport> {
+    if dest.try_exists()? {
+        bail!("creator.sqlite exists already: it is never replaced");
+    }
+    remove_import_temps(dest);
+    let r = import_python_inner(src, dest);
+    remove_import_temps(dest);
+    r
+}
+
+fn import_python_inner(src: &Path, dest: &Path) -> Result<ImportReport> {
+    let started = std::time::Instant::now();
+    let (copy, out) = (suffixed(dest, ".src"), suffixed(dest, ".import"));
+    std::fs::copy(src, &copy)?;
+    let wal = suffixed(src, "-wal");
+    if wal.exists() {
+        std::fs::copy(&wal, suffixed(dest, ".src-wal"))?;
+    }
+    let version = |c: &Connection| -> Result<i64> {
+        let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if v != VERSION {
+            bail!("ghidorah.sqlite is version {v}, expected {VERSION}");
+        }
+        Ok(v)
+    };
+    {
+        let c = Connection::open(&copy)?;
+        version(&c)?;
+        c.execute("VACUUM INTO ?1", [out.to_string_lossy()])?;
+    }
+    let mut report = {
+        let c = Connection::open(&out)?;
+        let v = version(&c)?;
+        let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        if check != "ok" {
+            bail!("ghidorah.sqlite failed the integrity check");
+        }
+        let groups = |sql: &str| -> Result<BTreeMap<String, i64>> {
+            let mut st = c.prepare(sql)?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        let count = |sql: &str| -> Result<i64> { Ok(c.query_row(sql, [], |r| r.get(0))?) };
+        ImportReport {
+            version: v,
+            mailboxes: groups("SELECT provider||'/'||status, COUNT(*) FROM mailboxes GROUP BY 1")?,
+            accounts: groups("SELECT platform||'/'||status, COUNT(*) FROM accounts GROUP BY 1")?,
+            proxies: count("SELECT COUNT(*) FROM proxies")?,
+            browsers: count("SELECT COUNT(*) FROM browsers")?,
+            browsers_with_profile: count(
+                "SELECT COUNT(*) FROM browsers WHERE COALESCE(path,'')<>''",
+            )?,
+            live_accounts: count(
+                "SELECT COUNT(*) FROM accounts WHERE status IN ('queued','running','waiting')",
+            )?,
+            mail_messages: count("SELECT COUNT(*) FROM mail_messages")?,
+            seconds: 0.0,
+        }
+    };
+    report.seconds = started.elapsed().as_secs_f64();
+    let json = dest.with_file_name("creator-import.json");
+    std::fs::write(&json, serde_json::to_vec_pretty(&report)?)?;
+    // On disk before it becomes the store; a hard link fails if `dest`
+    // appeared meanwhile, so an existing store is never replaced.
+    let placed = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&out)
+        .and_then(|f| f.sync_all())
+        .and_then(|_| std::fs::hard_link(&out, dest));
+    if let Err(e) = placed {
+        let _ = std::fs::remove_file(&json);
+        return Err(e.into());
+    }
+    Ok(report)
+}
+
+/// Our store at `dest`; the first time (no `dest`, Python's file at `python`)
+/// imported from Python's. An existing `dest` is never replaced.
+pub fn open_or_import(dest: &Path, python: &Path) -> Result<(Db, Option<ImportReport>)> {
+    if dest.try_exists()? || !python.try_exists()? {
+        return Ok((Db::open(dest)?, None));
+    }
+    let report = import_python(python, dest)?;
+    Ok((Db::open(dest)?, Some(report)))
+}
+
 #[cfg(test)]
 impl Db {
     /// A test sets a column no row function writes.
@@ -1492,6 +1631,35 @@ impl Drop for TempFile {
             let _ = std::fs::remove_file(format!("{}{ext}", self.0.display()));
         }
     }
+}
+
+#[cfg(test)]
+const FIXTURE_T: &str = "2026-01-01T00:00:00.000000+00:00";
+
+/// A Python-shaped v24 file: 3 mailboxes (outlook active and gone, ele),
+/// 4 accounts on 4 platforms, a proxy, a browser with a profile, 3 mails.
+#[cfg(test)]
+pub(crate) fn python_fixture() -> TempFile {
+    let (db, f) = temp_db();
+    db.exec_for_test(&format!(
+        "INSERT INTO mailboxes(id,provider,email,domain,token,status,created_at,client_id) VALUES
+           (1,'outlook','a1@fixture.example','fixture.example','TOKSECRET','active','{FIXTURE_T}','cid'),
+           (2,'outlook','a2@fixture.example','fixture.example','TOKSECRET','gone','{FIXTURE_T}','cid'),
+           (3,'ele','e1@fixture.example','fixture.example','TOKSECRET','active','{FIXTURE_T}',NULL);
+         INSERT INTO proxies(host,port,username,password,created_at)
+           VALUES ('198.51.100.7',8080,'user','PXSECRET','{FIXTURE_T}');
+         INSERT INTO browsers(mailbox_id,path,proxy_id,created_at,updated_at)
+           VALUES (1,'pid-1',1,'{FIXTURE_T}','{FIXTURE_T}');
+         INSERT INTO accounts(mailbox_id,platform,route,status,frozen,created_at,updated_at) VALUES
+           (1,'breezeblue','email','linked',0,'{FIXTURE_T}','{FIXTURE_T}'),
+           (2,'qwen','email','running',0,'{FIXTURE_T}','{FIXTURE_T}'),
+           (3,'grok','email','failed',1,'{FIXTURE_T}','{FIXTURE_T}'),
+           (1,'google','email','linked',0,'{FIXTURE_T}','{FIXTURE_T}');
+         INSERT INTO mail_messages(mailbox_id,sender,subject,body,received_at) VALUES
+           (1,'a@x.example','s','b','{FIXTURE_T}'),(1,'b@x.example','s','b','{FIXTURE_T}'),(3,'c@x.example','s','b','{FIXTURE_T}');"
+    ));
+    drop(db);
+    f
 }
 
 #[cfg(test)]
@@ -1539,7 +1707,7 @@ mod tests {
         assert_eq!(
             names(&c, "index")
                 .iter()
-                .filter(|n| !n.starts_with("sqlite_autoindex"))
+                .filter(|n| !n.starts_with("sqlite_autoindex") && *n != "idx_mail_sender")
                 .count(),
             21
         );
@@ -1908,6 +2076,277 @@ mod tests {
         assert!(
             !all.contains("PWSECRET9") && !all.contains("RECSECRET9"),
             "{all}"
+        );
+    }
+
+    const T: &str = FIXTURE_T;
+
+    /// A destination in a fresh temp folder (its import report lands beside it).
+    struct Dest(PathBuf);
+    impl Dest {
+        fn new() -> Dest {
+            let d = std::env::temp_dir()
+                .join(format!("creator-import-{}", uuid::Uuid::new_v4().simple()));
+            std::fs::create_dir_all(&d).unwrap();
+            Dest(d)
+        }
+        fn db(&self) -> PathBuf {
+            self.0.join("creator.sqlite")
+        }
+        /// Every file in the folder but our store, its WAL files and the report.
+        fn temps(&self) -> Vec<String> {
+            std::fs::read_dir(&self.0)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| {
+                    ![
+                        "creator.sqlite",
+                        "creator.sqlite-wal",
+                        "creator.sqlite-shm",
+                        "creator-import.json",
+                    ]
+                    .contains(&n.as_str())
+                })
+                .collect()
+        }
+    }
+    impl Drop for Dest {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn all_query() -> EmailQuery {
+        EmailQuery {
+            limit: 100,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn import_copies_everything_and_reports_counts() {
+        let src = python_fixture();
+        let d = Dest::new();
+        let r = import_python(&src.0, &d.db()).unwrap();
+        let m: BTreeMap<String, i64> = [
+            ("ele/active", 1),
+            ("outlook/active", 1),
+            ("outlook/gone", 1),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(r.mailboxes, m);
+        let a: BTreeMap<String, i64> = [
+            ("breezeblue/linked", 1),
+            ("google/linked", 1),
+            ("grok/failed", 1),
+            ("qwen/running", 1),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(r.accounts, a);
+        assert_eq!((r.version, r.proxies, r.browsers), (24, 1, 1));
+        assert_eq!(
+            (r.browsers_with_profile, r.live_accounts, r.mail_messages),
+            (1, 1, 3)
+        );
+        let db = Db::open(&d.db()).unwrap();
+        assert_eq!(db.email_list(&all_query()).unwrap()["total"], 3);
+        assert_eq!(
+            db.browser_get(1).unwrap().unwrap().path.as_deref(),
+            Some("pid-1")
+        );
+        assert!(d.0.join("creator-import.json").exists());
+        assert!(d.temps().is_empty(), "{:?}", d.temps());
+    }
+
+    #[test]
+    fn unported_platform_accounts_list_and_count() {
+        let src = python_fixture();
+        let d = Dest::new();
+        import_python(&src.0, &d.db()).unwrap();
+        let db = Db::open(&d.db()).unwrap();
+        assert_eq!(db.nav_counts().unwrap().0, 4);
+        let q = |platform: Option<&str>| AccountQuery {
+            platform: platform.map(str::to_string),
+            limit: 100,
+            ..Default::default()
+        };
+        assert_eq!(
+            db.account_list(&q(None)).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+        let grok = db.account_list(&q(Some("grok"))).unwrap();
+        assert_eq!(grok["items"][0]["frozen"], true);
+        assert_eq!(db.account_list(&q(Some("google"))).unwrap()["total"], 1);
+    }
+
+    #[test]
+    fn unmerged_wal_rows_are_imported_and_source_is_byte_identical() {
+        let src = python_fixture();
+        let w = Connection::open(&src.0).unwrap();
+        w.execute_batch(&format!(
+            "PRAGMA wal_autocheckpoint=0;
+             INSERT INTO mailboxes(provider,email,domain,token,created_at)
+               VALUES ('ele','w1@fixture.example','fixture.example','t','{T}'),
+                      ('ele','w2@fixture.example','fixture.example','t','{T}');"
+        ))
+        .unwrap();
+        let wal = suffixed(&src.0, "-wal");
+        let before = (std::fs::read(&src.0).unwrap(), std::fs::read(&wal).unwrap());
+        assert!(!before.1.is_empty());
+        let d = Dest::new();
+        let r = import_python(&src.0, &d.db()).unwrap();
+        assert_eq!(r.mailboxes.values().sum::<i64>(), 5);
+        let after = (std::fs::read(&src.0).unwrap(), std::fs::read(&wal).unwrap());
+        assert!(before == after, "the source changed");
+        assert!(d.temps().is_empty(), "{:?}", d.temps());
+        drop(w);
+    }
+
+    #[test]
+    fn import_refuses_other_versions() {
+        let src = python_fixture();
+        Connection::open(&src.0)
+            .unwrap()
+            .execute_batch("PRAGMA user_version=23")
+            .unwrap();
+        let d = Dest::new();
+        let e = format!("{:#}", import_python(&src.0, &d.db()).err().unwrap());
+        assert_eq!(e, "ghidorah.sqlite is version 23, expected 24");
+        assert!(!d.db().exists());
+        assert!(d.temps().is_empty(), "{:?}", d.temps());
+    }
+
+    #[test]
+    fn failed_import_leaves_no_store() {
+        let d = Dest::new();
+        let src = d.0.join("ghidorah.sqlite");
+        let junk: Vec<u8> = (0..4096).map(|_| rand::random::<u8>()).collect();
+        std::fs::write(&src, junk).unwrap();
+        assert!(import_python(&src, &d.db()).is_err());
+        std::fs::remove_file(&src).unwrap();
+        assert!(!d.db().exists());
+        assert!(d.temps().is_empty(), "{:?}", d.temps());
+        assert!(!d.0.join("creator-import.json").exists());
+    }
+
+    #[test]
+    fn leftover_import_file_is_replaced() {
+        let src = python_fixture();
+        let d = Dest::new();
+        std::fs::write(suffixed(&d.db(), ".import"), b"junk").unwrap();
+        std::fs::write(suffixed(&d.db(), ".src"), b"junk").unwrap();
+        let r = import_python(&src.0, &d.db()).unwrap();
+        assert_eq!(r.mail_messages, 3);
+        assert!(d.temps().is_empty(), "{:?}", d.temps());
+    }
+
+    #[test]
+    fn existing_store_is_never_reimported() {
+        let src = python_fixture();
+        let d = Dest::new();
+        drop(Db::open(&d.db()).unwrap());
+        let (db, r) = open_or_import(&d.db(), &src.0).unwrap();
+        assert!(r.is_none());
+        assert_eq!(db.email_list(&all_query()).unwrap()["total"], 0);
+    }
+
+    #[test]
+    fn import_never_replaces_an_existing_store() {
+        let src = python_fixture();
+        let d = Dest::new();
+        drop(Db::open(&d.db()).unwrap());
+        let before = std::fs::read(d.db()).unwrap();
+        let e = format!("{:#}", import_python(&src.0, &d.db()).err().unwrap());
+        assert_eq!(e, "creator.sqlite exists already: it is never replaced");
+        assert_eq!(std::fs::read(d.db()).unwrap(), before);
+        assert!(!d.0.join("creator-import.json").exists());
+        assert!(d.temps().is_empty(), "{:?}", d.temps());
+    }
+
+    #[test]
+    fn open_or_import_without_python_makes_a_fresh_store() {
+        let d = Dest::new();
+        let (db, r) = open_or_import(&d.db(), &d.0.join("ghidorah.sqlite")).unwrap();
+        assert!(r.is_none());
+        assert_eq!(db.nav_counts().unwrap(), (0, 0, 0));
+        assert!(!d.0.join("creator-import.json").exists());
+    }
+
+    #[test]
+    fn report_and_errors_hold_no_secret() {
+        let src = python_fixture();
+        let d = Dest::new();
+        let r = import_python(&src.0, &d.db()).unwrap();
+        let file = std::fs::read_to_string(d.0.join("creator-import.json")).unwrap();
+        for text in [serde_json::to_string(&r).unwrap(), file] {
+            for s in ["TOKSECRET", "PXSECRET", "fixture.example", "198.51.100.7"] {
+                assert!(!text.contains(s), "{s} in {text}");
+            }
+        }
+        Connection::open(&src.0)
+            .unwrap()
+            .execute_batch("PRAGMA user_version=23")
+            .unwrap();
+        let d2 = Dest::new();
+        let e = format!("{:#}", import_python(&src.0, &d2.db()).err().unwrap());
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        assert!(!e.contains(&dir) && !e.contains("creator-"), "{e}");
+    }
+
+    #[test]
+    fn python_db_path_sits_beside_our_local_root() {
+        let _root = crate::store::test_root("creator-pydb");
+        let local = crate::store::local_root().unwrap();
+        assert_eq!(
+            python_db_path().unwrap(),
+            local
+                .parent()
+                .unwrap()
+                .join("ghidorah-creator")
+                .join("ghidorah.sqlite")
+        );
+    }
+
+    #[test]
+    fn open_adds_the_sender_index_and_stays_v24() {
+        let (db, f) = temp_db();
+        db.c().execute_batch("DROP INDEX idx_mail_sender").unwrap();
+        drop(db);
+        let db = Db::open(&f.0).unwrap();
+        let c = db.c();
+        assert!(names(&c, "index").contains(&"idx_mail_sender".to_string()));
+        let v: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 24);
+    }
+
+    #[test]
+    fn free_count_scans_the_covering_index() {
+        let (db, _f) = temp_db();
+        let (w, args) = Db::breeze_free_outlook_where();
+        let c = db.c();
+        let mut st = c
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM mailboxes m WHERE {w}"
+            ))
+            .unwrap();
+        let plan: Vec<String> = st
+            .query_map(rusqlite::params_from_iter(&args), |r| r.get(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|l| l.contains("USING COVERING INDEX idx_mail_sender")),
+            "{plan:?}"
         );
     }
 }
