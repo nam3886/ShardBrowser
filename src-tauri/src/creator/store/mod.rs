@@ -663,31 +663,66 @@ impl Db {
     /// provider fixed to Outlook): active, domain not blocked, a token and a
     /// client id, no Breeze account made, in progress or frozen on it, and
     /// none failed with a code no retry fixes.
+    /// A mailbox holding mail from the platform's domains is used for it
+    /// already (owner, 2026-11-24): never free for it.
     // ponytail: no count cache (Python caches by table revisions); the
     // 500k perf test says whether one is needed.
     pub fn breeze_free_outlook_where() -> (String, Vec<rusqlite::types::Value>) {
         use rusqlite::types::Value as V;
+        let key = super::providers::breezeblue::KEY;
         let fatal = super::errors::NOT_RETRYABLE;
+        let (mail, mail_args) = platform_mail_cond(key);
         let sql = format!(
             "m.provider='outlook' AND m.status='active' \
              AND lower(m.domain) NOT IN (SELECT domain FROM blocked_domains) \
              AND m.token<>'' AND COALESCE(m.client_id,'')<>'' \
              AND m.id NOT IN (SELECT mailbox_id FROM accounts WHERE platform=? \
-             AND ((status<>'failed' OR frozen=1) OR (status='failed' AND error_code IN ({}))))",
+             AND ((status<>'failed' OR frozen=1) OR (status='failed' AND error_code IN ({})))) \
+             AND NOT EXISTS (SELECT 1 FROM mail_messages x WHERE x.mailbox_id=m.id AND {mail})",
             vec!["?"; fatal.len()].join(",")
         );
-        let mut args = vec![V::Text(super::providers::breezeblue::KEY.into())];
+        let mut args = vec![V::Text(key.into())];
         args.extend(fatal.iter().map(|c| V::Text((*c).into())));
+        args.extend(mail_args);
         (sql, args)
     }
 
-    /// Free Outlook mailboxes for Breeze Blue, oldest first.
-    pub fn breeze_free_outlook(&self, limit: i64) -> Result<Vec<i64>> {
+    /// Whether the mailbox holds mail from `platform`'s domains; with
+    /// `before`, only mail received before it (an account's own run brings
+    /// the platform's mail after the account was made). Undated mail counts
+    /// only without `before`.
+    pub fn has_platform_mail(
+        &self,
+        mailbox_id: i64,
+        platform: &str,
+        before: Option<&str>,
+    ) -> Result<bool> {
+        let (cond, mut args) = platform_mail_cond(platform);
+        args.insert(0, rusqlite::types::Value::Integer(mailbox_id));
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT x.received_at FROM mail_messages x WHERE x.mailbox_id=? AND {cond}"
+        ))?;
+        let dates: Vec<Option<String>> = st
+            .query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let Some(before) = before.and_then(parse_iso) else {
+            return Ok(!dates.is_empty());
+        };
+        Ok(dates
+            .iter()
+            .any(|d| d.as_deref().and_then(parse_iso).is_some_and(|t| t < before)))
+    }
+
+    /// Free Outlook mailboxes for Breeze Blue after mailbox `after_id`,
+    /// oldest first (a run walks them with this cursor).
+    pub fn breeze_free_outlook(&self, after_id: i64, limit: i64) -> Result<Vec<i64>> {
         let (w, mut args) = Self::breeze_free_outlook_where();
+        args.push(rusqlite::types::Value::Integer(after_id));
         args.push(rusqlite::types::Value::Integer(limit));
         let c = self.c();
         let mut st = c.prepare(&format!(
-            "SELECT m.id FROM mailboxes m WHERE {w} ORDER BY m.id LIMIT ?"
+            "SELECT m.id FROM mailboxes m WHERE {w} AND m.id>? ORDER BY m.id LIMIT ?"
         ))?;
         let ids = st
             .query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?
@@ -1331,6 +1366,23 @@ impl Db {
     }
 }
 
+/// `(sender LIKE …)` on alias `x` for the platform's mail domains (an
+/// address at the domain or a subdomain); false for a platform with none.
+fn platform_mail_cond(platform: &str) -> (String, Vec<rusqlite::types::Value>) {
+    let domains = super::providers::mail_domains(platform);
+    if domains.is_empty() {
+        return ("0".into(), vec![]);
+    }
+    let mut args = Vec::new();
+    for d in domains {
+        let d = d.replace('%', "").replace('_', "");
+        args.push(rusqlite::types::Value::Text(format!("%@{d}%")));
+        args.push(rusqlite::types::Value::Text(format!("%.{d}%")));
+    }
+    let likes = vec!["lower(x.sender) LIKE ?"; args.len()].join(" OR ");
+    (format!("({likes})"), args)
+}
+
 /// Seed a fresh database from a Python one (D7, M2): proxies (one already
 /// here by host, port and user is skipped; `kind` kept, `last_used_at`
 /// reset), blocked domains, and the Ele and proxy-rest settings. The source
@@ -1401,6 +1453,18 @@ impl Db {
     /// A test sets a column no row function writes.
     pub(crate) fn exec_for_test(&self, sql: &str) {
         self.c().execute_batch(sql).unwrap();
+    }
+
+    /// The messages of a mailbox's events, oldest first.
+    pub(crate) fn events_of_mailbox_for_test(&self, mailbox_id: i64) -> Vec<String> {
+        let c = self.c();
+        let mut st = c
+            .prepare("SELECT message FROM events WHERE mailbox_id=? ORDER BY id")
+            .unwrap();
+        st.query_map([mailbox_id], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 }
 

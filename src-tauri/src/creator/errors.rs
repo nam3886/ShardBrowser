@@ -79,6 +79,10 @@ const RULES: &[(Rule, &str)] = &[
     (Rule::Re(&GONE_RE), "MAILBOX_GONE"),
     (Rule::Contains("Ele API unavailable"), "MAIL_API_DOWN"),
     (Rule::Contains("Outlook unavailable"), "MAIL_API_DOWN"),
+    (
+        Rule::Contains(" mail, likely registered elsewhere"),
+        "ACCOUNT_EXISTS",
+    ),
     (Rule::Prefix(tts::NO_KEY), "API_KEY_FAILED"),
     (Rule::Prefix(tts::KEY_TEST_FAILED), "API_KEY_FAILED"),
     // Shard's launch refusals (`launch.rs`, `runtime.rs`) and our CDP wait
@@ -186,6 +190,10 @@ mod tests {
             assert_eq!(error_code(text), Some("MAIL_API_DOWN"), "{text}");
         }
         assert_eq!(error_code("mailbox gone"), Some("MAILBOX_GONE"));
+        assert_eq!(
+            error_code(&crate::creator::providers::has_mail_error("breezeblue")),
+            Some("ACCOUNT_EXISTS")
+        );
         assert!(fail_info("MAIL_API_DOWN").1);
     }
 

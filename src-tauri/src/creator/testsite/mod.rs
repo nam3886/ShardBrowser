@@ -95,6 +95,9 @@ pub struct Knobs {
     pub survey_busy_ms: u64,
     pub balance_status: u16,
     pub outlook_token: OutlookToken,
+    /// Graph also holds a Breeze Blue mail from before the run (the address
+    /// was registered elsewhere).
+    pub outlook_old_breeze_mail: bool,
 }
 
 impl Default for Knobs {
@@ -111,6 +114,7 @@ impl Default for Knobs {
             survey_busy_ms: 0,
             balance_status: 200,
             outlook_token: OutlookToken::Ok,
+            outlook_old_breeze_mail: false,
         }
     }
 }
@@ -472,5 +476,13 @@ async fn ms_messages(Ax(st): Ax<Shared>) -> Json<serde_json::Value> {
                       "content": format!("<p>Hi</p><a href=\"{}/verify?t={VERIFY_TOKEN}\">Verify email</a>", st.site) },
         })
     });
-    Json(json!({ "value": mail.into_iter().collect::<Vec<_>>() }))
+    let old = st.k.outlook_old_breeze_mail.then(|| {
+        json!({
+            "id": "old-1", "subject": "Reset your password for Breeze Blue",
+            "receivedDateTime": "2026-01-01T00:00:00Z",
+            "from": { "emailAddress": { "address": "noreply@breezeblue.ai" } },
+            "body": { "contentType": "text", "content": "Reset" },
+        })
+    });
+    Json(json!({ "value": mail.into_iter().chain(old).collect::<Vec<_>>() }))
 }

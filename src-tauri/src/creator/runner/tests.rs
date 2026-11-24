@@ -553,7 +553,7 @@ async fn the_job_is_seen_from_the_start_and_its_accounts_join_it() {
 fn outlook_mailbox(db: &Db, n: u32) -> i64 {
     let line = format!("o{n}@outlook.test|pw|{OUTLOOK_RT}|{OUTLOOK_CID}|r");
     assert_eq!(db.import_outlook(&line).unwrap().added, 1);
-    db.breeze_free_outlook(1000)
+    db.breeze_free_outlook(0, 1000)
         .unwrap()
         .into_iter()
         .max()
@@ -655,7 +655,7 @@ async fn outlook_down_at_preflight_is_mail_api_down_and_retryable() {
 async fn outlook_make_takes_free_mailboxes_oldest_first_and_skips_taken() {
     let (cx, _f, _site) = site_ctx(Knobs::default()).await;
     let db = &*cx.db;
-    let ids: Vec<i64> = (1..=10).map(|n| outlook_mailbox(db, n)).collect();
+    let ids: Vec<i64> = (1..=12).map(|n| outlook_mailbox(db, n)).collect();
     db.mailbox_create("ele", "e@ele.test", "ele.test", "tok")
         .unwrap();
     let account = |mb: i64, platform: &str, status: &str, code: Option<&str>| {
@@ -683,14 +683,25 @@ async fn outlook_make_takes_free_mailboxes_oldest_first_and_skips_taken() {
         "UPDATE mailboxes SET client_id='' WHERE id={}",
         ids[6]
     ));
+    // Breeze Blue mail in the inbox: used elsewhere. Another platform's: free.
+    let mail = |mb: i64, sender: &str| {
+        let m = store::NewMail {
+            sender: sender.into(),
+            ..Default::default()
+        };
+        db.mail_create(mb, &m).unwrap();
+    };
+    mail(ids[10], "Breeze Blue <noreply@breezeblue.ai>");
+    mail(ids[11], "no-reply@fish.audio");
     // Free: a retryable failure, an account on another platform, a fresh one.
     account(ids[7], KEY, "failed", Some("CAPTCHA_UNSOLVED"));
     account(ids[8], "google", "linked", None);
     assert_eq!(
-        db.breeze_free_outlook(100).unwrap(),
-        [ids[7], ids[8], ids[9]]
+        db.breeze_free_outlook(0, 100).unwrap(),
+        [ids[7], ids[8], ids[9], ids[11]]
     );
-    assert_eq!(db.breeze_free_outlook_count().unwrap(), 3);
+    assert_eq!(db.breeze_free_outlook(ids[8], 1).unwrap(), [ids[9]]);
+    assert_eq!(db.breeze_free_outlook_count().unwrap(), 4);
 
     // A run of 2 takes the two oldest; the browser cannot open here.
     cx.browsers.fail_open.store(true, SeqCst);
@@ -707,7 +718,7 @@ async fn outlook_make_takes_free_mailboxes_oldest_first_and_skips_taken() {
     assert_eq!(made, [ids[7], ids[8]]);
     // Asking for more than are free makes what there is.
     let out = make_breeze(&cx, 5, "none", "outlook", &RunState::default()).await;
-    assert_eq!(out.len(), 3, "the two retryable ones and the fresh one");
+    assert_eq!(out.len(), 4, "the two retryable ones and the two fresh ones");
 }
 
 #[test]
@@ -744,4 +755,44 @@ async fn outlook_no_secret_in_events_or_errors() {
     assert_eq!(out, [failed("API key test failed: HTTP 500".into())]);
     let a = only_account(&e);
     assert_no_secrets(&e, a.id);
+}
+
+#[tokio::test]
+async fn a_mailbox_whose_fresh_inbox_has_breeze_mail_is_skipped_without_rows() {
+    let (cx, _f, _site) = site_ctx(Knobs {
+        outlook_old_breeze_mail: true,
+        ..Knobs::default()
+    })
+    .await;
+    let mb = outlook_mailbox(&cx.db, 1);
+    let out = make_breeze(&cx, 1, "none", "outlook", &RunState::default()).await;
+    assert!(out.is_empty(), "{out:?}");
+    assert_eq!(cx.browsers.opens.load(SeqCst), 0);
+    assert!(cx.db.accounts_recent(KEY, 10).unwrap().is_empty());
+    assert!(cx.db.browser_of_mailbox(mb).unwrap().is_none());
+    assert_eq!(cx.db.breeze_free_outlook_count().unwrap(), 0);
+    let ev = cx.db.events_of_mailbox_for_test(mb);
+    assert_eq!(ev, ["has Breeze Blue mail, skipped"]);
+}
+
+#[tokio::test]
+async fn a_retry_on_a_mailbox_with_older_breeze_mail_is_account_exists() {
+    let (cx, _f, _site) = site_ctx(Knobs::default()).await;
+    let (id, mb) = outlook_account(&cx.db);
+    let m = store::NewMail {
+        sender: "Breeze Blue <noreply@breezeblue.ai>".into(),
+        received_at: Some("2026-01-01T00:00:00Z".into()),
+        ..Default::default()
+    };
+    cx.db.mail_create(mb, &m).unwrap();
+    let out = run_account(&cx, id).await;
+    let msg = "This email already has Breeze Blue mail, likely registered elsewhere";
+    assert_eq!(out, failed(msg.into()));
+    assert_eq!(cx.browsers.opens.load(SeqCst), 0);
+    let code = cx.db.account_get(id).unwrap().unwrap().error_code.unwrap();
+    assert_eq!(code, "ACCOUNT_EXISTS");
+    // Breeze Blue mail that came after the account was made is its own run's.
+    assert!(!cx.db.has_platform_mail(mb, KEY, Some("2025-01-01T00:00:00Z")).unwrap());
+    assert!(cx.db.has_platform_mail(mb, KEY, None).unwrap());
+    assert!(!cx.db.has_platform_mail(mb, "fish", None).unwrap());
 }

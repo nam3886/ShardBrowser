@@ -344,6 +344,10 @@ async fn attempt<B: Browsers>(cx: &Ctx<B>, id: i64, scrub: &Scrub) -> Result<End
             bail!(MAILBOX_GONE);
         }
     }
+    // Breeze Blue mail from before this account was made: registered elsewhere.
+    if db.has_platform_mail(mb.id, KEY, Some(&acc.created_at))? {
+        bail!(super::providers::has_mail_error(KEY));
+    }
     let opened = cx.browsers.open(db, br.id, proxy.as_ref()).await?;
     // Nothing below may skip the stop at the end: no `?` from here on.
     let (bid, mid) = (Some(br.id), Some(mb.id));
@@ -472,9 +476,10 @@ pub static RUN: LazyLock<RunState> = LazyLock::new(RunState::default);
 /// `count` new Breeze Blue accounts, one after another, under one `jobs` row.
 /// Per account, in this order: its mailbox (`mailbox_type` "ele": a new Ele
 /// inbox, its row saved inside; "outlook": the next free one, oldest first,
-/// taken once at the start, so fewer free ones make fewer accounts), a proxy
-/// and the browser row (an Outlook mailbox's earlier browser is reused), the
-/// account row (running), then `run_account`.
+/// each mailbox tried once per run, so fewer free ones make fewer accounts;
+/// one whose fresh inbox shows Breeze Blue mail is skipped), a proxy and the
+/// browser row (an Outlook mailbox's earlier browser is reused), the account
+/// row (running), then `run_account`.
 pub async fn make_breeze<B: Browsers>(
     cx: &Ctx<B>,
     count: u32,
@@ -493,21 +498,33 @@ pub async fn make_breeze<B: Browsers>(
         },
         j => j,
     };
-    let outlook = if mailbox_type == "outlook" {
-        match cx.db.breeze_free_outlook(count.into()) {
-            Ok(ids) => Some(ids),
-            Err(e) => return vec![failed(format!("{e:#}"))],
-        }
-    } else {
-        None
-    };
-    let n = outlook.as_ref().map_or(count as usize, Vec::len);
     let mut out = Vec::new();
-    for i in 0..n {
+    // The Outlook cursor: free mailboxes after the last one tried.
+    let mut after = 0;
+    while out.len() < count as usize {
         if run.stop.load(SeqCst) {
             break;
         }
-        let o = new_account(cx, job, proxy_mode, outlook.as_ref().map(|ids| ids[i])).await;
+        let mailbox = if mailbox_type == "outlook" {
+            match cx.db.breeze_free_outlook(after, 1) {
+                Ok(ids) => match ids.first() {
+                    Some(&id) => {
+                        after = id;
+                        Some(id)
+                    }
+                    None => break,
+                },
+                Err(e) => {
+                    out.push(failed(format!("{e:#}")));
+                    break;
+                }
+            }
+        } else {
+            None
+        };
+        let Some(o) = new_account(cx, job, proxy_mode, mailbox).await else {
+            continue; // skipped: the next free mailbox
+        };
         let no_proxy = o.error.as_deref() == Some(NO_PROXY);
         out.push(o);
         run.done.fetch_add(1, SeqCst);
@@ -519,28 +536,61 @@ pub async fn make_breeze<B: Browsers>(
 }
 
 /// One account on `outlook` (a free mailbox's id), or on a new Ele inbox.
+/// None: the Outlook mailbox's fresh inbox shows Breeze Blue mail, so it is
+/// skipped (no account row, no browser).
 async fn new_account<B: Browsers>(
     cx: &Ctx<B>,
     job: i64,
     mode: &str,
     outlook: Option<i64>,
-) -> Outcome {
+) -> Option<Outcome> {
     let db = &*cx.db;
     let scrub = Scrub::of(db);
     let mb_id = match (outlook, &cx.ele) {
         (Some(id), _) => id,
-        (None, None) => return failed(ELE_UNSET.into()),
+        (None, None) => return Some(failed(ELE_UNSET.into())),
         (None, Some(ele)) => match ele.create_mailbox().await {
             Ok(m) => m.id,
             Err(e) => {
                 let _ = db.event(None, None, "error", Some("mail"), &e.0);
-                return failed(e.0);
+                return Some(failed(e.0));
             }
         },
     };
+    if outlook.is_some() && used_elsewhere(cx, mb_id).await {
+        let msg = format!("has {} mail, skipped", super::providers::label(KEY));
+        let _ = db.event(None, Some(mb_id), "info", Some("mail"), &msg);
+        return None;
+    }
+    Some(make_rows_and_run(cx, job, mode, mb_id, &scrub).await)
+}
+
+/// An Outlook mailbox read once now (strictly, as the run's pre-flight
+/// does) holds Breeze Blue mail. A failed read is no answer: the run's own
+/// pre-flight reports it on the account.
+// ponytail: the run's pre-flight reads the inbox again (one more token call);
+// pass the read on if that extra call shows.
+async fn used_elsewhere<B: Browsers>(cx: &Ctx<B>, mb_id: i64) -> bool {
+    let Ok(Some(mb)) = cx.db.mailbox_get(mb_id) else {
+        return false;
+    };
+    if MailClient::Outlook(&cx.outlook).check(&mb).await.is_err() {
+        return false;
+    }
+    cx.db.has_platform_mail(mb_id, KEY, None).unwrap_or(false)
+}
+
+async fn make_rows_and_run<B: Browsers>(
+    cx: &Ctx<B>,
+    job: i64,
+    mode: &str,
+    mb_id: i64,
+    scrub: &Scrub,
+) -> Outcome {
+    let db = &*cx.db;
     let has_browser = match db.browser_of_mailbox(mb_id) {
         Ok(b) => b.is_some(),
-        Err(e) => return failed(err_line(&e, &scrub)),
+        Err(e) => return failed(err_line(&e, scrub)),
     };
     let picked = if has_browser {
         Ok(None)
@@ -565,12 +615,12 @@ async fn new_account<B: Browsers>(
     })();
     let id = match rows {
         Ok(id) => id,
-        Err(e) => return failed(err_line(&e, &scrub)),
+        Err(e) => return failed(err_line(&e, scrub)),
     };
     if let Err(e) = picked {
         // ponytail: a rerun of this account finds its browser without a proxy
         // and fails "proxy deleted" (PROXY_UNUSABLE), not NO_PROXY; reruns are M5.
-        let error = err_line(&e, &scrub);
+        let error = err_line(&e, scrub);
         finish(db, id, "failed", Some(error.clone()), None);
         return failed(error);
     }

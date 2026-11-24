@@ -1062,7 +1062,8 @@ mod tests {
             .starts_with("Ele API unavailable"));
     }
 
-    /// 500,000 mailboxes and 1,000 accounts: the first window with its
+    /// 500,000 mailboxes, 1,000 accounts and 400,000 mails (some from Breeze
+    /// Blue, which take a mailbox out of "free"): the first window with its
     /// counts, unfiltered and with each filter, under 300 ms in a release
     /// build (a debug build's SQLite is unoptimized). By hand on the box:
     /// `cargo test --release --locked --lib creator::pages::tests::emails_list_at_500k -- --ignored --nocapture`
@@ -1079,7 +1080,11 @@ mod tests {
              WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 1000) \
              INSERT INTO accounts (mailbox_id, platform, route, status, created_at, updated_at) \
              SELECT i * 7, 'breezeblue', 'email', CASE WHEN i % 2 = 0 THEN 'linked' ELSE 'failed' END, \
-             '2026-11-01', '2026-11-01' FROM n; ANALYZE;",
+             '2026-11-01', '2026-11-01' FROM n; \
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 400000) \
+             INSERT INTO mail_messages (mailbox_id, ele_message_id, sender, subject, body, stored_at) \
+             SELECT (i % 200000) + 1, 'm' || i, CASE WHEN i % 50 = 0 THEN 'noreply@breezeblue.ai' \
+             ELSE 'news@shop.example' END, 's', 'b', '2026-11-01' FROM n; ANALYZE;",
         );
         let mut worst = Duration::ZERO;
         for (name, a) in [
