@@ -54,3 +54,14 @@ cargo test --locked --lib creator::runner::live::live_breeze -- --ignored --noca
 ```
 
 Run it in an interactive desktop session (for example a scheduled task with "run only when the user is logged on"), not from a non-interactive SSH session, so the browser windows have a desktop. Import from a copy of the Python database (with its `-wal` and `-shm`), never from the file the Python app has open.
+
+## Import rehearsal (M4)
+
+Ignored tests in `creator::runner::live` for rehearsing the Python import on a backup copy, in the sandbox, under `box-env.ps1`. They print counts and timings only, never an address, token, proxy or path of the owner's data. Run each by name, as above.
+
+- `live_import`: `CREATOR_LIVE_IMPORT` (a backup copy of `ghidorah.sqlite`, never the live file) and `CREATOR_LIVE_OUT` (a new folder; it panics when the folder already holds `creator.sqlite`). Imports as the app's first open does and prints the import report (the same JSON as `creator-import.json`) and the seconds.
+- `live_perf`: `CREATOR_LIVE_OUT`. Opens that store and runs each page query 5 times: the Emails window with its counts (unfiltered, type Outlook, status active, status gone, free for Breeze Blue, search `a`), the Breeze Blue free count, `has_platform_mail` on the newest Outlook mailbox, the Accounts window and the nav counts. Prints `PERF <name> median_ms=<n> OK|SLOW` (SLOW above 300 ms) and the free count's `EXPLAIN QUERY PLAN`. Use a release build (`cargo test --release ...`) for real numbers.
+- `live_profiles_check`: `CREATOR_LIVE_OUT` and `CREATOR_LIVE_SHARD_PROFILES` (a `profiles` folder, only listed). Prints how many browser rows hold a profile id, and how many of those have `<id>.json` there (`found`) or not (`missing`).
+- `live_open_imported`: `CREATOR_TEST_BROWSER`, `CREATOR_LIVE_FINGERPRINTS`, `CREATOR_LIVE_OUT`, `CREATOR_LIVE_SHARD_COPY` (a folder holding `profiles/` and `user-data/` copied out of stock Shard for the chosen profile) and `CREATOR_LIVE_BROWSER_ID` (the browser row). Copies them into the test's own data folder, drops the copy's saved tabs, opens the profile through `shard::open_session` on the row's proxy and never navigates: prints `OPENED timezone=<tz> cookies=<n>` (the cookies of the row's account platforms) and stops the profile. Needs the interactive desktop session, like `live_breeze`.
+- `live_outlook_test` with `CREATOR_LIVE_SAMPLE=N` and no `CREATOR_LIVE_OUTLOOK`: tests N random active Outlook mailboxes of the store that have no account, 5 at a time.
+- `live_breeze` with `CREATOR_LIVE_MAILBOX_ID=<id>`: runs exactly that Outlook mailbox (count 1); it panics before any browser opens when the mailbox is not free for Breeze Blue.
