@@ -465,6 +465,11 @@ impl Db {
             VERSION => {}
             n => bail!("database version {n} not supported"),
         }
+        // Ours, not Python's (no version change): the platform-mail rule reads
+        // senders and mailbox ids only, never the mail bodies.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_mail_sender ON mail_messages(sender, mailbox_id)",
+        )?;
         Ok(Db(Mutex::new(conn)))
     }
 
@@ -1691,7 +1696,7 @@ mod tests {
         assert_eq!(
             names(&c, "index")
                 .iter()
-                .filter(|n| !n.starts_with("sqlite_autoindex"))
+                .filter(|n| !n.starts_with("sqlite_autoindex") && *n != "idx_mail_sender")
                 .count(),
             21
         );
@@ -2282,6 +2287,42 @@ mod tests {
                 .unwrap()
                 .join("ghidorah-creator")
                 .join("ghidorah.sqlite")
+        );
+    }
+
+    #[test]
+    fn open_adds_the_sender_index_and_stays_v24() {
+        let (db, f) = temp_db();
+        db.c().execute_batch("DROP INDEX idx_mail_sender").unwrap();
+        drop(db);
+        let db = Db::open(&f.0).unwrap();
+        let c = db.c();
+        assert!(names(&c, "index").contains(&"idx_mail_sender".to_string()));
+        let v: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 24);
+    }
+
+    #[test]
+    fn free_count_scans_the_covering_index() {
+        let (db, _f) = temp_db();
+        let (w, args) = Db::breeze_free_outlook_where();
+        let c = db.c();
+        let mut st = c
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM mailboxes m WHERE {w}"
+            ))
+            .unwrap();
+        let plan: Vec<String> = st
+            .query_map(rusqlite::params_from_iter(&args), |r| r.get(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|l| l.contains("USING COVERING INDEX idx_mail_sender")),
+            "{plan:?}"
         );
     }
 }
