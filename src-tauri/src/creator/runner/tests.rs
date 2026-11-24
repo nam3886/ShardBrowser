@@ -718,7 +718,11 @@ async fn outlook_make_takes_free_mailboxes_oldest_first_and_skips_taken() {
     assert_eq!(made, [ids[7], ids[8]]);
     // Asking for more than are free makes what there is.
     let out = make_breeze(&cx, 5, "none", "outlook", &RunState::default()).await;
-    assert_eq!(out.len(), 4, "the two retryable ones and the two fresh ones");
+    assert_eq!(
+        out.len(),
+        4,
+        "the two retryable ones and the two fresh ones"
+    );
 }
 
 #[test]
@@ -792,7 +796,10 @@ async fn a_retry_on_a_mailbox_with_older_breeze_mail_is_account_exists() {
     let code = cx.db.account_get(id).unwrap().unwrap().error_code.unwrap();
     assert_eq!(code, "ACCOUNT_EXISTS");
     // Breeze Blue mail that came after the account was made is its own run's.
-    assert!(!cx.db.has_platform_mail(mb, KEY, Some("2025-01-01T00:00:00Z")).unwrap());
+    assert!(!cx
+        .db
+        .has_platform_mail(mb, KEY, Some("2025-01-01T00:00:00Z"))
+        .unwrap());
     assert!(cx.db.has_platform_mail(mb, KEY, None).unwrap());
     assert!(!cx.db.has_platform_mail(mb, "fish", None).unwrap());
 }
