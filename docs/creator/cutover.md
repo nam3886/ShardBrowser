@@ -39,7 +39,7 @@ Copy each folder to a backup location, then compare the file count and total siz
 
 ## 6. First start
 
-1. Start our app. The import runs in the background: about one to two minutes for a 1.2 GB database; our pages say "Importing the Python database…" until it ends, then need a refresh.
+1. Start our app. The import runs in the background: about a minute or two for a database of about 1 GB; our pages say "Importing the Python database…" until it ends, then need a refresh.
 2. Check `%LOCALAPPDATA%\shardx-launcher\creator-import.json` exists and was written today; if not, the import did not run (see step 5.1). Its counts must equal the Python app's last screens (Emails type and status, Accounts per platform, Proxies), and `live_accounts` must be 0.
 3. An import error shows on our pages and leaves no `creator.sqlite`; the next start retries. Fix the cause (disk space, a database not at version 24) or roll back.
 4. Shard's All profiles count equals the count before the cutover; the folder "Ghidorah" is there.

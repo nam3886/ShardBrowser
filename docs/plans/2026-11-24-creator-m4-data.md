@@ -10,7 +10,7 @@
 
 **Spec:** `docs/plans/2026-11-22-creator-m0-m2.md` (D1, D7, D17, roadmap M4/M8), `docs/plans/2026-11-23-creator-m3-outlook.md` (Risks: the platform-mail scan, token divergence), `docs/creator/working-process.md` §7, `docs/creator/box-workflow.md`, `docs/creator/windows-build.md`. Python source of truth (read-only): `ghidorah_creator/paths.py` (`app_dir`, `db_path`), `store/schema.py` (`MIGRATIONS`: 24 entries), `browser/shard_session.py` (`FOLDER = "Ghidorah"`, `ensure_proxy`, `open_shard_profile`).
 
-**Facts:** production DB on the box `%LOCALAPPDATA%\ghidorah-creator\ghidorah.sqlite`, about 1.2 GB: 38,312 Outlook mailboxes (14,553 active, 23,759 gone), Ele mailboxes, a few hundred accounts across platforms, 1,010 proxies, secrets in plain columns. The Python app stays in production until cutover and is retired after it (owner, no comparison runs).
+**Facts:** production DB on the box `%LOCALAPPDATA%\ghidorah-creator\ghidorah.sqlite`, about 1 GB: tens of thousands of Outlook mailboxes (more gone than active), Ele mailboxes, a few hundred accounts across platforms, about a thousand proxies, secrets in plain columns. The Python app stays in production until cutover and is retired after it (owner, no comparison runs).
 
 ---
 
@@ -55,7 +55,7 @@ The M0–M2 and M3 Global Constraints apply unchanged. M4 adds:
 2. **A half copy becomes our store, or a failure loops.** A crash or error mid-copy must leave no `creator.sqlite`, so the next start retries; within one run a failure is reported, not retried per call. Pinned in Task 1 (`failed_import_leaves_no_store`, `leftover_import_file_is_replaced`, `db_reports_importing_then_the_same_failure`).
 3. **Import runs again over live data.** An existing `creator.sqlite` must never be replaced, whatever sits at Python's path. Pinned in Task 1 (`existing_store_is_never_reimported`).
 4. **Secrets in the report or an error.** Pinned in Task 1 (`report_and_errors_hold_no_secret`).
-5. **The platform-mail scan on 1.2 GB of real mail.** `breeze_free_outlook_count` scans `mail_messages` senders per call; real bodies make the table large. Measured in Task 3, fixed in Task 4.
+5. **The platform-mail scan on about 1 GB of real mail.** `breeze_free_outlook_count` scans `mail_messages` senders per call; real bodies make the table large. Measured in Task 3, fixed in Task 4.
 
 ---
 
@@ -163,7 +163,7 @@ Content, as numbered steps:
 3. **Close stock ShardBrowser** normally (Quit; no profile running).
 4. **Back up**, with a file count and size check after each copy: `%LOCALAPPDATA%\ghidorah-creator`, `%APPDATA%\shardx-launcher` (config, `proxies.json`, profiles), `%LOCALAPPDATA%\shardx-launcher`, and Shard's data location if it was moved in Settings (profiles, user-data, extensions).
 5. **Install ours:** first check that no `%LOCALAPPDATA%\shardx-launcher\creator.sqlite` exists (one would stop the import; move it aside). Install over stock (same app id: in-place upgrade); if stock must be uninstalled first, uninstall **without** "delete app data". Never tick "delete app data".
-6. **First start:** the import runs in the background (one to two minutes at 1.2 GB; our pages say "Importing the Python database…"). Check `creator-import.json` exists and was written today (else the import did not run): counts equal to the Python app's last screen; `live_accounts` 0. Shard's All profiles count equals the pre-cutover count; folder "Ghidorah" present.
+6. **First start:** the import runs in the background (one to two minutes at about 1 GB; our pages say "Importing the Python database…"). Check `creator-import.json` exists and was written today (else the import did not run): counts equal to the Python app's last screen; `live_accounts` 0. Shard's All profiles count equals the pre-cutover count; folder "Ghidorah" present.
 7. **Verify live:** Test 20 mailboxes; open 2 imported accounts' profiles from Shard (logged in, proxy timezone); 1 Breeze Blue on an imported free Outlook mailbox; 1 run of each provider. A failure here → rollback or fix, owner's call.
 8. **Retire Python:** uninstall it and remove its shortcut; keep its data folder backup (step 4) until the owner deletes it.
 9. **Rollback** (any time before the owner declares the cutover done): close ours; uninstall it; restore the step 4 folders over the current ones (replace, not merge); reinstall the kept stock installer; start the Python app. Its DB was only read, so it continues where it stopped. Anything done in our app since cutover is lost (move our `creator.sqlite` aside first if it should be kept).
@@ -185,5 +185,5 @@ Content, as numbered steps:
 - **A `browsers.path` id Shard no longer has:** the v24 migration deleted every older browser row, so a missing id means the profile was deleted or trashed in Shard. Code already turns it into "profile is gone" and makes a new profile (the account then needs Log in again). Task 3 Step 5 counts them.
 - **Unknown extension ids on a copied profile** (YesCaptcha library copies are not in the sandbox): may refuse or warn at launch in the sandbox only. At cutover the library is Shard's own and present.
 - **Rows Python left mid-run:** `queued`/`running` shown as "making", `waiting` raw, until M5's startup sweep exists; the runbook requires 0 at cutover.
-- **First start is slow once:** the copy, vacuum and check of 1.2 GB take a minute or two (Task 3 measures it); pages show "Importing the Python database…" meanwhile and need a refresh after. Accepted; no progress UI. Disk needs about 3x the file size free during the import (temp copy + result).
+- **First start is slow once:** the copy, vacuum and check of about 1 GB take a minute or two (Task 3 measures it); pages show "Importing the Python database…" meanwhile and need a refresh after. Accepted; no progress UI. Disk needs about 3x the file size free during the import (temp copy + result).
 - **Token rotations between rehearsal and cutover:** the sandbox's Tests rotate refresh tokens only in the sandbox; Microsoft keeps the older ones valid (M3 Risks), and the cutover copies Python's.

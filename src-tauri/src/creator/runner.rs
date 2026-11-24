@@ -653,7 +653,7 @@ pub fn db() -> Result<Arc<Db>> {
     }
     let path = store::db_path()?;
     let python = store::python_db_path()?;
-    if path.exists() || !python.exists() {
+    if path.try_exists()? || !python.try_exists()? {
         let db = Arc::new(Db::open(&path)?);
         *g = Some(DbState::Ready(db.clone()));
         return Ok(db);

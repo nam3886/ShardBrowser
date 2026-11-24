@@ -1505,8 +1505,12 @@ fn remove_import_temps(dest: &Path) {
 /// The Python database becomes our store at `dest`, as an exact copy (D7).
 /// SQLite never opens `src`: its file (and `-wal`, never `-shm`) is copied
 /// byte for byte to `dest.src`, which is vacuumed into `dest.import`, checked,
-/// and renamed to `dest`. Temp files go in every case; a failure leaves no `dest`.
+/// flushed and hard-linked as `dest`. Temp files go in every case; a failure
+/// leaves no `dest`, and an existing `dest` is never replaced.
 pub fn import_python(src: &Path, dest: &Path) -> Result<ImportReport> {
+    if dest.try_exists()? {
+        bail!("creator.sqlite exists already: it is never replaced");
+    }
     remove_import_temps(dest);
     let r = import_python_inner(src, dest);
     remove_import_temps(dest);
@@ -1565,7 +1569,14 @@ fn import_python_inner(src: &Path, dest: &Path) -> Result<ImportReport> {
     report.seconds = started.elapsed().as_secs_f64();
     let json = dest.with_file_name("creator-import.json");
     std::fs::write(&json, serde_json::to_vec_pretty(&report)?)?;
-    if let Err(e) = std::fs::rename(&out, dest) {
+    // On disk before it becomes the store; a hard link fails if `dest`
+    // appeared meanwhile, so an existing store is never replaced.
+    let placed = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&out)
+        .and_then(|f| f.sync_all())
+        .and_then(|_| std::fs::hard_link(&out, dest));
+    if let Err(e) = placed {
         let _ = std::fs::remove_file(&json);
         return Err(e.into());
     }
@@ -1575,7 +1586,7 @@ fn import_python_inner(src: &Path, dest: &Path) -> Result<ImportReport> {
 /// Our store at `dest`; the first time (no `dest`, Python's file at `python`)
 /// imported from Python's. An existing `dest` is never replaced.
 pub fn open_or_import(dest: &Path, python: &Path) -> Result<(Db, Option<ImportReport>)> {
-    if dest.exists() || !python.exists() {
+    if dest.try_exists()? || !python.try_exists()? {
         return Ok((Db::open(dest)?, None));
     }
     let report = import_python(python, dest)?;
@@ -2244,6 +2255,19 @@ mod tests {
         let (db, r) = open_or_import(&d.db(), &src.0).unwrap();
         assert!(r.is_none());
         assert_eq!(db.email_list(&all_query()).unwrap()["total"], 0);
+    }
+
+    #[test]
+    fn import_never_replaces_an_existing_store() {
+        let src = python_fixture();
+        let d = Dest::new();
+        drop(Db::open(&d.db()).unwrap());
+        let before = std::fs::read(d.db()).unwrap();
+        let e = format!("{:#}", import_python(&src.0, &d.db()).err().unwrap());
+        assert_eq!(e, "creator.sqlite exists already: it is never replaced");
+        assert_eq!(std::fs::read(d.db()).unwrap(), before);
+        assert!(!d.0.join("creator-import.json").exists());
+        assert!(d.temps().is_empty(), "{:?}", d.temps());
     }
 
     #[test]
