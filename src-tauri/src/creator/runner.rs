@@ -628,21 +628,51 @@ async fn make_rows_and_run<B: Browsers>(
     run_account(cx, id).await
 }
 
-static DB: Mutex<Option<Arc<Db>>> = Mutex::new(None);
+enum DbState {
+    Ready(Arc<Db>),
+    Importing,
+    Failed(String),
+}
 
-/// Our store (`store::db_path`), opened once.
+static DB: Mutex<Option<DbState>> = Mutex::new(None);
+
+/// What every page call answers while the first open imports Python's database.
+pub const IMPORTING: &str = "Importing the Python database…";
+
+/// Our store (`store::db_path`), opened once. The first open with no store
+/// and Python's database at its place imports it (`store::open_or_import`) on
+/// a thread of its own; meanwhile, and after a failure until the app restarts,
+/// every call gets the state's error.
 pub fn db() -> Result<Arc<Db>> {
     let mut g = DB.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(db) = &*g {
-        return Ok(db.clone());
+    match &*g {
+        Some(DbState::Ready(db)) => return Ok(db.clone()),
+        Some(DbState::Importing) => bail!(IMPORTING),
+        Some(DbState::Failed(t)) => bail!("{t}"),
+        None => {}
     }
     let path = store::db_path()?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    let python = store::python_db_path()?;
+    if path.exists() || !python.exists() {
+        let db = Arc::new(Db::open(&path)?);
+        *g = Some(DbState::Ready(db.clone()));
+        return Ok(db);
     }
-    let db = Arc::new(Db::open(&path)?);
-    *g = Some(db.clone());
-    Ok(db)
+    *g = Some(DbState::Importing);
+    std::thread::spawn(move || {
+        let state = match store::open_or_import(&path, &python) {
+            Ok((db, _)) => DbState::Ready(Arc::new(db)),
+            Err(e) => DbState::Failed(format!("{e:#}")),
+        };
+        *DB.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
+    });
+    bail!(IMPORTING)
+}
+
+/// Forget the store, so a test's next `db()` opens its own.
+#[cfg(test)]
+pub(crate) fn reset_db_for_test() {
+    *DB.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 static OUTLOOK: std::sync::OnceLock<OutlookClient> = std::sync::OnceLock::new();
